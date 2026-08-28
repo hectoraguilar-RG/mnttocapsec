@@ -19,7 +19,11 @@ import {
   Camera,
   Calendar as CalendarIcon,
   Repeat,
-  LogOut
+  LogOut,
+  Play,
+  Trash2,
+  Ban,
+  RotateCcw
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -74,6 +78,11 @@ export default function App() {
   const [modalBloqueo, setModalBloqueo] = useState(null);
   const [motivoBloqueo, setMotivoBloqueo] = useState('falta_material');
   const [detalleBloqueo, setDetalleBloqueo] = useState('');
+
+  const [modalInicio, setModalInicio] = useState(null);
+  const [notasInicio, setNotasInicio] = useState('');
+  const [fotoInicio, setFotoInicio] = useState(null);
+  const [guardandoInicio, setGuardandoInicio] = useState(false);
 
   const [modalTerminar, setModalTerminar] = useState(null);
   const [notasCierre, setNotasCierre] = useState('');
@@ -210,21 +219,214 @@ export default function App() {
     reader.readAsDataURL(file);
   }
 
+  async function guardarFotoHistorial(tareaId, tipo, foto, comentario = '') {
+    if (!foto || !usuarioActual) return;
+
+    const { error } = await supabase.from('fotos_tarea').insert({
+      tarea_id: tareaId,
+      tecnico_id: usuarioActual.id,
+      tipo,
+      url: foto,
+      comentario: comentario || null
+    });
+
+    if (error) {
+      console.error('Error guardando foto en historial:', error);
+    }
+  }
+
+  async function cerrarSesionActiva(tareaId, tipoFin, notas = '') {
+    if (!usuarioActual) return;
+
+    const { data: sesiones, error: errorBusqueda } = await supabase
+      .from('sesiones_tarea')
+      .select('id')
+      .eq('tarea_id', tareaId)
+      .eq('tecnico_id', usuarioActual.id)
+      .is('fecha_fin', null)
+      .order('fecha_inicio', { ascending: false })
+      .limit(1);
+
+    if (errorBusqueda) {
+      console.error('Error buscando sesión activa:', errorBusqueda);
+      return;
+    }
+
+    if (sesiones && sesiones.length > 0) {
+      await supabase
+        .from('sesiones_tarea')
+        .update({
+          fecha_fin: new Date().toISOString(),
+          tipo_fin: tipoFin,
+          notas: notas || null
+        })
+        .eq('id', sesiones[0].id);
+    }
+  }
+
+  async function guardarInicioActividad() {
+    if (!modalInicio || !usuarioActual) return;
+    setGuardandoInicio(true);
+
+    const ahora = new Date().toISOString();
+
+    const { data: sesionesAbiertas, error: errorSesiones } = await supabase
+      .from('sesiones_tarea')
+      .select('id')
+      .eq('tarea_id', modalInicio.id)
+      .eq('tecnico_id', usuarioActual.id)
+      .is('fecha_fin', null)
+      .limit(1);
+
+    if (errorSesiones) {
+      setGuardandoInicio(false);
+      alert('No se pudo comprobar el registro de tiempo.');
+      return;
+    }
+
+    const datosTarea = {
+      estado: 'en_proceso',
+      notas_inicio: notasInicio || modalInicio.notas_inicio || null
+    };
+
+    if (!modalInicio.fecha_inicio) datosTarea.fecha_inicio = ahora;
+    if (!modalInicio.iniciado_por) datosTarea.iniciado_por = usuarioActual.id;
+    if (fotoInicio) datosTarea.foto_antes = fotoInicio;
+
+    const { error: errorTarea } = await supabase
+      .from('tareas')
+      .update(datosTarea)
+      .eq('id', modalInicio.id);
+
+    if (errorTarea) {
+      setGuardandoInicio(false);
+      alert(`No se pudo iniciar la actividad: ${errorTarea.message}`);
+      return;
+    }
+
+    if (!sesionesAbiertas || sesionesAbiertas.length === 0) {
+      const { error: errorSesion } = await supabase.from('sesiones_tarea').insert({
+        tarea_id: modalInicio.id,
+        tecnico_id: usuarioActual.id,
+        fecha_inicio: ahora,
+        notas: notasInicio || null
+      });
+
+      if (errorSesion) {
+        setGuardandoInicio(false);
+        alert(`La actividad cambió a En proceso, pero no se pudo registrar el tiempo: ${errorSesion.message}`);
+        cargarTareas();
+        return;
+      }
+    }
+
+    if (fotoInicio) {
+      await guardarFotoHistorial(modalInicio.id, 'antes', fotoInicio, notasInicio);
+    }
+
+    setGuardandoInicio(false);
+    setModalInicio(null);
+    setNotasInicio('');
+    setFotoInicio(null);
+    cargarTareas();
+    alert('Actividad iniciada. El tiempo comenzó a registrarse.');
+  }
+
+  async function cancelarTarea(tarea) {
+    if (usuarioActual?.rol !== 'admin') return;
+
+    const motivo = window.prompt('Motivo de cancelación de la actividad:');
+    if (motivo === null) return;
+    if (!motivo.trim()) {
+      alert('Escribe un motivo de cancelación.');
+      return;
+    }
+
+    if (!window.confirm(`¿Cancelar la actividad "${tarea.titulo}"? El registro se conservará.`)) return;
+
+    const ahora = new Date().toISOString();
+
+    await supabase
+      .from('sesiones_tarea')
+      .update({ fecha_fin: ahora, tipo_fin: 'cancelada' })
+      .eq('tarea_id', tarea.id)
+      .is('fecha_fin', null);
+
+    const { error } = await supabase
+      .from('tareas')
+      .update({
+        estado: 'cancelada',
+        cancelado_por: usuarioActual.id,
+        fecha_cancelacion: ahora,
+        motivo_cancelacion: motivo.trim()
+      })
+      .eq('id', tarea.id);
+
+    if (error) {
+      alert(`No se pudo cancelar: ${error.message}`);
+      return;
+    }
+
+    cargarTareas();
+  }
+
+  async function eliminarTarea(tarea) {
+    if (usuarioActual?.rol !== 'admin') return;
+
+    const texto = `ELIMINAR`;
+    const confirmacion = window.prompt(
+      `Esta acción borra definitivamente la actividad "${tarea.titulo}" y sus avances.\n\nEscribe ${texto} para confirmar:`
+    );
+
+    if (confirmacion !== texto) return;
+
+    // Se eliminan hijos primero para evitar problemas si alguna relación antigua no tiene CASCADE.
+    await supabase.from('fotos_tarea').delete().eq('tarea_id', tarea.id);
+    await supabase.from('sesiones_tarea').delete().eq('tarea_id', tarea.id);
+    await supabase.from('avances_tarea').delete().eq('tarea_id', tarea.id);
+    await supabase.from('bloqueos_tarea').delete().eq('tarea_id', tarea.id);
+
+    const { error } = await supabase.from('tareas').delete().eq('id', tarea.id);
+
+    if (error) {
+      alert(`No se pudo eliminar la actividad: ${error.message}`);
+      return;
+    }
+
+    cargarTareas();
+    alert('Actividad eliminada definitivamente.');
+  }
+
   async function guardarCierreTarea() {
     if (!modalTerminar || !usuarioActual) return;
     setGuardandoCierre(true);
+
+    const ahora = new Date().toISOString();
+
+    // Al concluir una orden se cierran todas las sesiones que hayan quedado abiertas.
+    await supabase
+      .from('sesiones_tarea')
+      .update({ fecha_fin: ahora, tipo_fin: 'completada' })
+      .eq('tarea_id', modalTerminar.id)
+      .is('fecha_fin', null);
 
     const { error } = await supabase
       .from('tareas')
       .update({ 
         estado: 'completada', 
-        fecha_completada: new Date().toISOString(),
+        fecha_completada: ahora,
+        fecha_fin: ahora,
+        finalizado_por: usuarioActual.id,
         notas_cierre: notasCierre,
-        foto_antes: fotoAntes,
+        foto_antes: fotoAntes || modalTerminar.foto_antes || null,
         foto_despues: fotoDespues,
         descripcion: `${modalTerminar.descripcion ? modalTerminar.descripcion + '\n' : ''}[Concluida por ${usuarioActual.nombre.split(' ')[0]}]: ${notasCierre || 'Trabajo terminado'}`
       })
       .eq('id', modalTerminar.id);
+
+    if (fotoDespues) {
+      await guardarFotoHistorial(modalTerminar.id, 'despues', fotoDespues, notasCierre);
+    }
 
     setGuardandoCierre(false);
     if (!error) {
@@ -234,6 +436,8 @@ export default function App() {
       setFotoDespues(null);
       cargarTareas();
       alert('¡Tarea completada con éxito!');
+    } else {
+      alert(`No se pudo concluir la actividad: ${error.message}`);
     }
   }
 
@@ -249,6 +453,12 @@ export default function App() {
       foto_avance: fotoAvance
     });
 
+    if (fotoAvance) {
+      await guardarFotoHistorial(modalAvance.id, 'proceso', fotoAvance, notaAvance);
+    }
+
+    await cerrarSesionActiva(modalAvance.id, 'relevo', notaAvance);
+
     const nuevosAsignados = reasignarA 
       ? Array.from(new Set([...(modalAvance.tecnicos_ids || []), reasignarA]))
       : modalAvance.tecnicos_ids;
@@ -256,7 +466,6 @@ export default function App() {
     const { error } = await supabase.from('tareas').update({
       estado: 'en_proceso',
       tecnicos_ids: nuevosAsignados,
-      foto_antes: fotoAvance || modalAvance.foto_antes,
       descripcion: `${modalAvance.descripcion ? modalAvance.descripcion + '\n' : ''}[Avance ${usuarioActual.nombre.split(' ')[0]} ${porcentajeAvance}%]: ${notaAvance}`
     }).eq('id', modalAvance.id);
 
@@ -267,12 +476,14 @@ export default function App() {
       setFotoAvance(null);
       setReasignarA('');
       cargarTareas();
-      alert('Avance y relevo guardados.');
+      alert('Avance guardado. Tu sesión de trabajo quedó cerrada para permitir el relevo.');
+    } else {
+      alert(`No se pudo guardar el avance: ${error.message}`);
     }
   }
 
   async function guardarBloqueo() {
-    if (!modalBloqueo) return;
+    if (!modalBloqueo || !usuarioActual) return;
 
     await supabase.from('bloqueos_tarea').insert({
       tarea_id: modalBloqueo.id,
@@ -280,10 +491,21 @@ export default function App() {
       detalle: detalleBloqueo
     });
 
-    await supabase.from('tareas').update({ estado: 'bloqueada' }).eq('id', modalBloqueo.id);
+    await cerrarSesionActiva(modalBloqueo.id, 'bloqueo', detalleBloqueo);
+
+    const { error } = await supabase
+      .from('tareas')
+      .update({ estado: 'bloqueada' })
+      .eq('id', modalBloqueo.id);
 
     setModalBloqueo(null);
     setDetalleBloqueo('');
+
+    if (error) {
+      alert(`No se pudo bloquear la actividad: ${error.message}`);
+      return;
+    }
+
     cargarTareas();
   }
 
@@ -348,8 +570,18 @@ export default function App() {
       });
       cargarTareas();
 
-      if (window.confirm('Orden generada con éxito. ¿Deseas enviar el aviso a WhatsApp ahora?')) {
-        window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
+      if (window.confirm('Orden generada con éxito. ¿Deseas abrir WhatsApp con el aviso preparado?')) {
+        const tecnicosSeleccionados = perfiles.filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id));
+
+        if (tecnicosSeleccionados.length === 1 && tecnicosSeleccionados[0].telefono) {
+          const telefonoLimpio = tecnicosSeleccionados[0].telefono.replace(/\D/g, '');
+          const telefonoMexico = telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`;
+          window.open(`https://wa.me/${telefonoMexico}?text=${mensajeWhatsApp}`, '_blank');
+        } else {
+          // Para equipos de varias personas, WhatsApp no permite enviar automáticamente a varios chats sin API.
+          // Se abre el selector para que el supervisor elija el chat o grupo correspondiente.
+          window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
+        }
       }
     }
   }
@@ -400,6 +632,7 @@ export default function App() {
     if (filtroEstado === 'en_proceso') return t.estado === 'en_proceso';
     if (filtroEstado === 'bloqueadas') return t.estado === 'bloqueada';
     if (filtroEstado === 'completadas') return t.estado === 'completada';
+    if (filtroEstado === 'canceladas') return t.estado === 'cancelada';
     return true;
   });
 
@@ -748,7 +981,8 @@ export default function App() {
                         className={`bg-white p-4 rounded-xl border shadow-sm flex flex-col justify-between ${
                           t.estado === 'completada' ? 'border-emerald-200 bg-emerald-50/30' : 
                           t.estado === 'bloqueada' ? 'border-amber-200 bg-amber-50/20' : 
-                          t.estado === 'en_proceso' ? 'border-blue-200 bg-blue-50/20' : 'border-slate-200'
+                          t.estado === 'en_proceso' ? 'border-blue-200 bg-blue-50/20' :
+                          t.estado === 'cancelada' ? 'border-orange-200 bg-orange-50/20' : 'border-slate-200'
                         }`}
                       >
                         <div>
@@ -798,37 +1032,100 @@ export default function App() {
                           )}
                         </div>
 
-                        {t.estado !== 'completada' && (
+                        {t.estado !== 'completada' && t.estado !== 'cancelada' && (
                           <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-                            <button 
-                              onClick={() => {
-                                setModalTerminar(t);
-                                setNotasCierre('');
-                                setFotoAntes(t.foto_antes || null);
-                                setFotoDespues(null);
-                              }}
-                              className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                            >
-                              <CheckCircle2 className="w-4 h-4" /> Concluir / Fotos
-                            </button>
+                            {(t.estado === 'pendiente' || t.estado === 'bloqueada') && (
+                              <button
+                                onClick={() => {
+                                  setModalInicio(t);
+                                  setNotasInicio('');
+                                  setFotoInicio(t.foto_antes || null);
+                                }}
+                                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                              >
+                                {t.estado === 'bloqueada' ? <RotateCcw className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                                {t.estado === 'bloqueada' ? ' Reanudar' : ' Iniciar actividad'}
+                              </button>
+                            )}
 
-                            <button 
-                              onClick={() => {
-                                setModalAvance(t);
-                                setFotoAvance(null);
-                                setNotaAvance('');
-                              }}
-                              className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                            >
-                              <MessageSquareShare className="w-4 h-4" /> Relevo
-                            </button>
+                            {t.estado === 'en_proceso' && (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setModalInicio(t);
+                                    setNotasInicio('');
+                                    setFotoInicio(t.foto_antes || null);
+                                  }}
+                                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <Play className="w-4 h-4" /> Continuar / Iniciar turno
+                                </button>
 
-                            <button 
-                              onClick={() => setModalBloqueo(t)}
-                              className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center transition"
-                            >
-                              <AlertTriangle className="w-4 h-4" />
-                            </button>
+                                <button 
+                                  onClick={() => {
+                                    setModalTerminar(t);
+                                    setNotasCierre('');
+                                    setFotoAntes(t.foto_antes || null);
+                                    setFotoDespues(null);
+                                  }}
+                                  className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <CheckCircle2 className="w-4 h-4" /> Terminar
+                                </button>
+
+                                <button 
+                                  onClick={() => {
+                                    setModalAvance(t);
+                                    setFotoAvance(null);
+                                    setNotaAvance('');
+                                  }}
+                                  className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <MessageSquareShare className="w-4 h-4" /> Avance / Relevo
+                                </button>
+
+                                <button 
+                                  onClick={() => setModalBloqueo(t)}
+                                  title="Pausar por bloqueo"
+                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center transition"
+                                >
+                                  <AlertTriangle className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+
+                            {usuarioActual.rol === 'admin' && (
+                              <>
+                                <button
+                                  onClick={() => cancelarTarea(t)}
+                                  className="bg-orange-100 hover:bg-orange-200 text-orange-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <Ban className="w-4 h-4" /> Cancelar
+                                </button>
+                                <button
+                                  onClick={() => eliminarTarea(t)}
+                                  className="bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <Trash2 className="w-4 h-4" /> Eliminar
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {t.estado === 'cancelada' && (
+                          <div className="pt-2 border-t border-slate-100">
+                            <div className="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded-lg p-2">
+                              <strong>Actividad cancelada.</strong> {t.motivo_cancelacion || 'Sin motivo registrado.'}
+                            </div>
+                            {usuarioActual.rol === 'admin' && (
+                              <button
+                                onClick={() => eliminarTarea(t)}
+                                className="mt-2 bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                              >
+                                <Trash2 className="w-4 h-4" /> Eliminar definitivamente
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1031,6 +1328,14 @@ export default function App() {
           >
             ✅ Terminadas (Semana {numeroSemana})
           </button>
+          <button 
+            onClick={() => setFiltroEstado('canceladas')}
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
+              filtroEstado === 'canceladas' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🚫 Canceladas
+          </button>
         </nav>
       )}
 
@@ -1042,6 +1347,66 @@ export default function App() {
         >
           <PlusCircle className="w-4 h-4" /> + Exprés
         </button>
+      )}
+
+      {/* MODAL INICIAR / CONTINUAR */}
+      {modalInicio && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {modalInicio.estado === 'en_proceso' ? 'Continuar actividad / Iniciar turno' : 'Iniciar actividad'}
+                </h3>
+                <p className="text-[11px] text-slate-500">{modalInicio.titulo}</p>
+              </div>
+              <button onClick={() => setModalInicio(null)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Foto antes / estado al recibir la actividad</label>
+                <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer bg-slate-50 transition min-h-[120px]">
+                  {fotoInicio ? (
+                    <img src={fotoInicio} alt="Antes" className="w-full h-24 object-cover rounded-lg" />
+                  ) : (
+                    <>
+                      <Camera className="w-6 h-6 text-slate-400 mb-1" />
+                      <span className="text-[10px] text-slate-500">Tomar o subir foto</span>
+                    </>
+                  )}
+                  <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => procesarFoto(e, setFotoInicio)} />
+                </label>
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Observación inicial (opcional)</label>
+                <textarea
+                  rows={2}
+                  placeholder="Ej. Se recibe fuga activa / falta retirar pieza..."
+                  value={notasInicio}
+                  onChange={e => setNotasInicio(e.target.value)}
+                  className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <p className="text-[10px] text-slate-500 bg-blue-50 border border-blue-100 rounded-lg p-2">
+                El tiempo comienza cuando pulses el botón de abajo. Si ya tienes una sesión abierta en esta actividad, no se duplicará.
+              </p>
+            </div>
+
+            <button
+              onClick={guardarInicioActividad}
+              disabled={guardandoInicio}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-3 rounded-lg shadow-md transition flex items-center justify-center gap-2"
+            >
+              <Play className="w-4 h-4" />
+              {guardandoInicio ? 'Iniciando...' : 'Comenzar actividad y registrar tiempo'}
+            </button>
+          </div>
+        </div>
       )}
 
       {/* MODAL CONCLUIR */}
@@ -1082,7 +1447,7 @@ export default function App() {
                         <span className="text-[10px] text-slate-500">Subir foto</span>
                       </>
                     )}
-                    <input type="file" accept="image/*" className="hidden" onChange={e => procesarFoto(e, setFotoAntes)} />
+                    {!fotoAntes && <span className="text-[9px] text-slate-400 mt-1">Sin evidencia inicial</span>}
                   </label>
                 </div>
 
@@ -1097,7 +1462,7 @@ export default function App() {
                         <span className="text-[10px] text-slate-500">Subir foto</span>
                       </>
                     )}
-                    <input type="file" accept="image/*" className="hidden" onChange={e => procesarFoto(e, setFotoDespues)} />
+                    <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => procesarFoto(e, setFotoDespues)} />
                   </label>
                 </div>
               </div>
@@ -1164,7 +1529,7 @@ export default function App() {
                       <span className="text-[10px] text-slate-500">Tomar foto de lo avanzado</span>
                     </>
                   )}
-                  <input type="file" accept="image/*" className="hidden" onChange={e => procesarFoto(e, setFotoAvance)} />
+                  <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => procesarFoto(e, setFotoAvance)} />
                 </label>
               </div>
 
