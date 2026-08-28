@@ -18,8 +18,7 @@ import {
   MessageSquareShare,
   Camera,
   Calendar as CalendarIcon,
-  Repeat,
-  Share2
+  Repeat
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -88,7 +87,7 @@ export default function App() {
   const [reasignarA, setReasignarA] = useState('');
   const [guardandoAvance, setGuardandoAvance] = useState(false);
 
-  // Formulario Asignación con Recurrencia
+  // Formulario Asignación
   const hoyStr = new Date().toISOString().split('T')[0];
   const [nuevaTarea, setNuevaTarea] = useState({
     titulo: '',
@@ -265,7 +264,6 @@ export default function App() {
     cargarTareas();
   }
 
-  // Generar tareas en rango excluyendo fines de semana
   async function crearTareaProgramada(e) {
     e.preventDefault();
     if (!nuevaTarea.titulo || !nuevaTarea.ubicacion || nuevaTarea.tecnicos_seleccionados.length === 0) {
@@ -279,7 +277,6 @@ export default function App() {
 
     for (let d = new Date(fechaInicio); d <= fechaFin; d.setDate(d.getDate() + 1)) {
       const diaSemana = d.getDay();
-      // 0 = Domingo, 6 = Sábado
       if (nuevaTarea.es_recurrente && (diaSemana === 0 || diaSemana === 6)) {
         continue;
       }
@@ -409,20 +406,48 @@ export default function App() {
 
   const tecnicosLista = perfiles.filter(p => p.rol === 'tecnico');
 
+  // Configuración de Gráficas Optimizada para Impresión y PDF
   const datosGraficaTecnicos = {
     labels: tecnicosLista.map(t => t.nombre.split(' ')[0]),
     datasets: [
       {
         label: 'Completadas',
         data: tecnicosLista.map(t => tareasReporte.filter(tar => (tar.tecnico_id === t.id || tar.tecnicos_ids?.includes(t.id)) && tar.estado === 'completada').length),
-        backgroundColor: '#10b981'
+        backgroundColor: '#10b981',
+        borderRadius: 4
       },
       {
         label: 'Pendientes / En Proceso',
         data: tecnicosLista.map(t => tareasReporte.filter(tar => (tar.tecnico_id === t.id || tar.tecnicos_ids?.includes(t.id)) && tar.estado !== 'completada').length),
-        backgroundColor: '#3b82f6'
+        backgroundColor: '#3b82f6',
+        borderRadius: 4
       }
     ]
+  };
+
+  const opcionesBarra = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'top',
+        labels: { boxWidth: 12, font: { size: 11, weight: 'bold' } }
+      }
+    },
+    scales: {
+      x: {
+        ticks: {
+          autoSkip: false, // OBLIGA A MOSTRAR TODOS LOS NOMBRES
+          font: { size: 11, weight: '600' },
+          color: '#1e293b'
+        },
+        grid: { display: false }
+      },
+      y: {
+        beginAtZero: true,
+        ticks: { stepSize: 1, font: { size: 10 } }
+      }
+    }
   };
 
   const datosGraficaOrigen = {
@@ -435,6 +460,17 @@ export default function App() {
       ],
       backgroundColor: ['#3b82f6', '#8b5cf6', '#f59e0b']
     }]
+  };
+
+  const opcionesDona = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'bottom',
+        labels: { boxWidth: 12, font: { size: 10, weight: '600' }, padding: 12 }
+      }
+    }
   };
 
   const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
@@ -504,7 +540,6 @@ export default function App() {
       <main className="max-w-5xl mx-auto p-4 sm:p-6 space-y-6">
         {pestañaActiva === 'operacion' && (
           <>
-            {/* Formulario Asignación con Programación Diaria */}
             {usuarioActual?.rol === 'admin' && (
               <section className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -535,7 +570,6 @@ export default function App() {
                     />
                   </div>
 
-                  {/* PROGRAMACIÓN / RECURRENCIA DIARIA */}
                   <div>
                     <label className="font-semibold text-slate-600 block mb-1 flex items-center gap-1">
                       <CalendarIcon className="w-3.5 h-3.5 text-blue-600" /> Fecha Inicio
@@ -621,7 +655,7 @@ export default function App() {
               </section>
             )}
 
-            {/* Listado de Tareas con Filtro de Auditoría para Supervisor */}
+            {/* Listado de Tareas */}
             <section className="space-y-3">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                 <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
@@ -760,20 +794,21 @@ export default function App() {
           </>
         )}
 
-        {/* ======================= PANEL EJECUTIVO ======================= */}
+        {/* ======================= PANEL EJECUTIVO & REPORTE ======================= */}
         {pestañaActiva === 'ejecutivo' && (
-          <section className="space-y-6">
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <section className="space-y-5 print:space-y-4 print:p-0">
+            {/* Encabezado Formal */}
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:border-b-2 print:border-slate-800 print:shadow-none print:p-3">
               <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md print:bg-transparent print:p-0">
                   {etiquetaPeriodo}
                 </span>
-                <h2 className="text-xl font-bold text-slate-900 mt-2">Reporte de Desempeño Operativo</h2>
-                <p className="text-xs text-slate-500">Mantenimiento Menor e Instalaciones</p>
+                <h2 className="text-xl font-bold text-slate-900 mt-1 print:text-lg">Reporte de Desempeño Operativo</h2>
+                <p className="text-xs text-slate-500">Colegio Americano de Puebla • Mantenimiento Menor e Instalaciones</p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                <div className="bg-slate-100 p-1 rounded-xl flex text-xs font-semibold print:hidden">
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto print:hidden">
+                <div className="bg-slate-100 p-1 rounded-xl flex text-xs font-semibold">
                   <button 
                     onClick={() => setTipoPeriodoReporte('semanal')}
                     className={`px-3 py-1.5 rounded-lg transition ${tipoPeriodoReporte === 'semanal' ? 'bg-white shadow-xs text-blue-600' : 'text-slate-500'}`}
@@ -803,95 +838,108 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                <p className="text-xs text-slate-500 font-medium">Tareas Concluidas</p>
-                <p className="text-2xl font-bold text-emerald-600 mt-1">{totalCompletadasRep}</p>
-                <span className="text-[10px] text-slate-400">En este periodo</span>
+            {/* Tarjetas de Métricas */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 print:grid-cols-4 print:gap-2">
+              <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm print:border print:p-2.5">
+                <p className="text-[11px] text-slate-500 font-medium">Concluidas</p>
+                <p className="text-2xl font-bold text-emerald-600 mt-0.5 print:text-xl">{totalCompletadasRep}</p>
+                <span className="text-[9px] text-slate-400">Total en periodo</span>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                <p className="text-xs text-slate-500 font-medium">Exprés en Recorrido</p>
-                <p className="text-2xl font-bold text-purple-600 mt-1">{totalExpresRep}</p>
-                <span className="text-[10px] text-slate-400">Atenciones inmediatas</span>
+              <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm print:border print:p-2.5">
+                <p className="text-[11px] text-slate-500 font-medium">Exprés en Recorrido</p>
+                <p className="text-2xl font-bold text-purple-600 mt-0.5 print:text-xl">{totalExpresRep}</p>
+                <span className="text-[9px] text-slate-400">Atenciones rápidas</span>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                <p className="text-xs text-slate-500 font-medium">Detenidas por Insumo</p>
-                <p className="text-2xl font-bold text-amber-600 mt-1">{totalBloqueadasRep}</p>
-                <span className="text-[10px] text-slate-400">Compras / Proveedores</span>
+              <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm print:border print:p-2.5">
+                <p className="text-[11px] text-slate-500 font-medium">Detenidas (Compras)</p>
+                <p className="text-2xl font-bold text-amber-600 mt-0.5 print:text-xl">{totalBloqueadasRep}</p>
+                <span className="text-[9px] text-slate-400">Falta insumo / prov.</span>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                <p className="text-xs text-slate-500 font-medium">En Curso / Pendientes</p>
-                <p className="text-2xl font-bold text-blue-600 mt-1">{totalPendientesRep}</p>
-                <span className="text-[10px] text-slate-400">Por concluir</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                <h3 className="font-bold text-xs text-slate-700 mb-4 flex items-center gap-2 uppercase tracking-wide">
-                  <BarChart3 className="w-4 h-4 text-blue-600" /> Rendimiento por Técnico ({etiquetaPeriodo})
-                </h3>
-                <div className="h-60">
-                  <Bar data={datosGraficaTecnicos} options={{ responsive: true, maintainAspectRatio: false }} />
-                </div>
-              </div>
-
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                <h3 className="font-bold text-xs text-slate-700 mb-4 flex items-center gap-2 uppercase tracking-wide">
-                  <PieIcon className="w-4 h-4 text-emerald-600" /> Distribución Operativa
-                </h3>
-                <div className="h-60 flex justify-center">
-                  <Doughnut data={datosGraficaOrigen} options={{ responsive: true, maintainAspectRatio: false }} />
-                </div>
+              <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm print:border print:p-2.5">
+                <p className="text-[11px] text-slate-500 font-medium">En Curso / Pendientes</p>
+                <p className="text-2xl font-bold text-blue-600 mt-0.5 print:text-xl">{totalPendientesRep}</p>
+                <span className="text-[9px] text-slate-400">En programación</span>
               </div>
             </div>
 
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-              <h3 className="font-bold text-xs text-slate-700 mb-3 uppercase tracking-wide">
+            {/* GRÁFICAS REORGANIZADAS PARA QUE NO SE ENCIZMEN */}
+            <div className="space-y-4 print:space-y-3">
+              {/* Gráfica 1: Rendimiento por Técnico a Ancho Completo */}
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm print:border print:p-3">
+                <h3 className="font-bold text-xs text-slate-700 mb-2 flex items-center gap-1.5 uppercase tracking-wide">
+                  <BarChart3 className="w-4 h-4 text-blue-600" /> Rendimiento y Conclusión por Colaborador
+                </h3>
+                <div className="h-56 print:h-48 w-full">
+                  <Bar data={datosGraficaTecnicos} options={opcionesBarra} />
+                </div>
+              </div>
+
+              {/* Gráfica 2: Distribución Operativa */}
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm print:border print:p-3">
+                <h3 className="font-bold text-xs text-slate-700 mb-2 flex items-center gap-1.5 uppercase tracking-wide">
+                  <PieIcon className="w-4 h-4 text-emerald-600" /> Distribución de Órdenes y Tipo de Atención
+                </h3>
+                <div className="h-44 print:h-40 flex justify-center w-full">
+                  <Doughnut data={datosGraficaOrigen} options={opcionesDona} />
+                </div>
+              </div>
+            </div>
+
+            {/* Tabla de Evidencias */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm print:border print:p-3 print:break-inside-avoid">
+              <h3 className="font-bold text-xs text-slate-700 mb-2 uppercase tracking-wide">
                 Desglose de Trabajos Concluidos ({totalCompletadasRep})
               </h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                      <th className="p-2.5">Actividad / Ubicación</th>
-                      <th className="p-2.5">Origen</th>
-                      <th className="p-2.5">Responsable(s)</th>
-                      <th className="p-2.5">Notas de Cierre</th>
-                      <th className="p-2.5 text-center">Fotos</th>
+                      <th className="p-2">Actividad / Ubicación</th>
+                      <th className="p-2">Origen</th>
+                      <th className="p-2">Responsable(s)</th>
+                      <th className="p-2">Notas de Cierre</th>
+                      <th className="p-2 text-center">Fotos</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {tareasReporte.filter(t => t.estado === 'completada').map(t => {
-                      const nombres = perfiles
-                        .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
-                        .map(p => p.nombre.split(' ')[0])
-                        .join(' + ');
+                    {tareasReporte.filter(t => t.estado === 'completada').length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-4 text-center text-slate-400">
+                          Sin órdenes completadas registradas en este periodo.
+                        </td>
+                      </tr>
+                    ) : (
+                      tareasReporte.filter(t => t.estado === 'completada').map(t => {
+                        const nombres = perfiles
+                          .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
+                          .map(p => p.nombre.split(' ')[0])
+                          .join(' + ');
 
-                      return (
-                        <tr key={t.id}>
-                          <td className="p-2.5">
-                            <p className="font-bold text-slate-800">{t.titulo}</p>
-                            <p className="text-[11px] text-slate-500">{t.ubicacion}</p>
-                          </td>
-                          <td className="p-2.5">
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                              t.tipo_origen === 'en_recorrido' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
-                            }`}>
-                              {t.tipo_origen === 'en_recorrido' ? 'Exprés' : 'Programada'}
-                            </span>
-                          </td>
-                          <td className="p-2.5 font-medium text-slate-700">{nombres}</td>
-                          <td className="p-2.5 text-slate-600 max-w-xs truncate">{t.notas_cierre || 'Concluido'}</td>
-                          <td className="p-2.5 text-center">
-                            <div className="flex justify-center gap-1">
-                              {t.foto_antes && <span className="text-[10px] bg-slate-100 px-1 rounded">Antes</span>}
-                              {t.foto_despues && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded">Después</span>}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                        return (
+                          <tr key={t.id}>
+                            <td className="p-2">
+                              <p className="font-bold text-slate-800">{t.titulo}</p>
+                              <p className="text-[11px] text-slate-500">{t.ubicacion}</p>
+                            </td>
+                            <td className="p-2">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                t.tipo_origen === 'en_recorrido' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                              }`}>
+                                {t.tipo_origen === 'en_recorrido' ? 'Exprés' : 'Programada'}
+                              </span>
+                            </td>
+                            <td className="p-2 font-medium text-slate-700">{nombres}</td>
+                            <td className="p-2 text-slate-600 max-w-xs truncate">{t.notas_cierre || 'Concluido'}</td>
+                            <td className="p-2 text-center">
+                              <div className="flex justify-center gap-1">
+                                {t.foto_antes && <span className="text-[10px] bg-slate-100 px-1 rounded">Antes</span>}
+                                {t.foto_despues && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded">Después</span>}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -902,7 +950,7 @@ export default function App() {
 
       {/* BARRA INFERIOR DE FILTROS */}
       {pestañaActiva === 'operacion' && (
-        <nav className="fixed bottom-3 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-md text-white px-3 py-2 rounded-full shadow-2xl border border-slate-700 z-40 flex items-center gap-1.5 max-w-[95vw] overflow-x-auto">
+        <nav className="fixed bottom-3 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-md text-white px-3 py-2 rounded-full shadow-2xl border border-slate-700 z-40 flex items-center gap-1.5 max-w-[95vw] overflow-x-auto print:hidden">
           <button 
             onClick={() => setFiltroEstado('todas')}
             className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
@@ -950,7 +998,7 @@ export default function App() {
       {usuarioActual?.rol === 'tecnico' && pestañaActiva === 'operacion' && (
         <button 
           onClick={() => setModalExpres(true)}
-          className="fixed bottom-16 right-4 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2.5 rounded-full shadow-xl flex items-center gap-1.5 font-bold text-xs transition z-30 transform active:scale-95"
+          className="fixed bottom-16 right-4 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2.5 rounded-full shadow-xl flex items-center gap-1.5 font-bold text-xs transition z-30 transform active:scale-95 print:hidden"
         >
           <PlusCircle className="w-4 h-4" /> + Exprés
         </button>
@@ -958,7 +1006,7 @@ export default function App() {
 
       {/* MODAL CONCLUIR */}
       {modalTerminar && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center">
               <div>
@@ -1028,7 +1076,7 @@ export default function App() {
 
       {/* MODAL AVANCE */}
       {modalAvance && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="font-bold text-slate-800 text-sm">Registrar Avance / Relevo</h3>
@@ -1108,7 +1156,7 @@ export default function App() {
 
       {/* MODAL EXPRÉS */}
       {modalExpres && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="font-bold text-slate-800 text-sm">Nueva Atención en Recorrido</h3>
@@ -1161,7 +1209,7 @@ export default function App() {
 
       {/* MODAL BLOQUEO */}
       {modalBloqueo && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="font-bold text-slate-800 text-sm">Reportar Bloqueo / Falta de Insumo</h3>
