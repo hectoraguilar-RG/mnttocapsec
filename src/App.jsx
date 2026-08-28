@@ -17,7 +17,9 @@ import {
   PieChart as PieIcon,
   MessageSquareShare,
   Camera,
-  Calendar as CalendarIcon
+  Calendar as CalendarIcon,
+  Repeat,
+  Share2
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -62,9 +64,12 @@ export default function App() {
   const [cargando, setCargando] = useState(true);
   const [pestañaActiva, setPestañaActiva] = useState('operacion');
 
+  // Filtros
   const [filtroEstado, setFiltroEstado] = useState('todas');
+  const [filtroTecnicoAdmin, setFiltroTecnicoAdmin] = useState('todos');
   const [tipoPeriodoReporte, setTipoPeriodoReporte] = useState('semanal');
 
+  // Modales
   const [modalExpres, setModalExpres] = useState(false);
   const [modalBloqueo, setModalBloqueo] = useState(null);
   const [motivoBloqueo, setMotivoBloqueo] = useState('falta_material');
@@ -83,6 +88,7 @@ export default function App() {
   const [reasignarA, setReasignarA] = useState('');
   const [guardandoAvance, setGuardandoAvance] = useState(false);
 
+  // Formulario Asignación con Recurrencia
   const hoyStr = new Date().toISOString().split('T')[0];
   const [nuevaTarea, setNuevaTarea] = useState({
     titulo: '',
@@ -90,6 +96,8 @@ export default function App() {
     ubicacion: '',
     prioridad: 'media',
     fecha_programada: hoyStr,
+    fecha_fin: hoyStr,
+    es_recurrente: false,
     tecnicos_seleccionados: []
   });
 
@@ -257,6 +265,7 @@ export default function App() {
     cargarTareas();
   }
 
+  // Generar tareas en rango excluyendo fines de semana
   async function crearTareaProgramada(e) {
     e.preventDefault();
     if (!nuevaTarea.titulo || !nuevaTarea.ubicacion || nuevaTarea.tecnicos_seleccionados.length === 0) {
@@ -264,30 +273,64 @@ export default function App() {
       return;
     }
 
-    const { error } = await supabase.from('tareas').insert({
-      titulo: nuevaTarea.titulo,
-      descripcion: nuevaTarea.descripcion,
-      ubicacion: nuevaTarea.ubicacion,
-      prioridad: nuevaTarea.prioridad,
-      tecnico_id: nuevaTarea.tecnicos_seleccionados[0],
-      tecnicos_ids: nuevaTarea.tecnicos_seleccionados,
-      creado_por: usuarioActual?.id,
-      tipo_origen: 'programada',
-      estado: 'pendiente',
-      fecha_programada: nuevaTarea.fecha_programada
-    });
+    const registrosParaInsertar = [];
+    const fechaInicio = new Date(nuevaTarea.fecha_programada + 'T00:00:00');
+    const fechaFin = nuevaTarea.es_recurrente ? new Date(nuevaTarea.fecha_fin + 'T00:00:00') : fechaInicio;
+
+    for (let d = new Date(fechaInicio); d <= fechaFin; d.setDate(d.getDate() + 1)) {
+      const diaSemana = d.getDay();
+      // 0 = Domingo, 6 = Sábado
+      if (nuevaTarea.es_recurrente && (diaSemana === 0 || diaSemana === 6)) {
+        continue;
+      }
+
+      registrosParaInsertar.push({
+        titulo: nuevaTarea.titulo,
+        descripcion: nuevaTarea.descripcion,
+        ubicacion: nuevaTarea.ubicacion,
+        prioridad: nuevaTarea.prioridad,
+        tecnico_id: nuevaTarea.tecnicos_seleccionados[0],
+        tecnicos_ids: nuevaTarea.tecnicos_seleccionados,
+        creado_por: usuarioActual?.id,
+        tipo_origen: 'programada',
+        estado: 'pendiente',
+        fecha_programada: d.toISOString().split('T')[0]
+      });
+    }
+
+    const { error } = await supabase.from('tareas').insert(registrosParaInsertar);
 
     if (!error) {
+      const nombresTecnicos = perfiles
+        .filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id))
+        .map(p => p.nombre.split(' ')[0])
+        .join(', ');
+
+      const mensajeWhatsApp = encodeURIComponent(
+        `🛠️ *NUEVA ORDEN DE TRABAJO*\n\n` +
+        `📋 *Actividad:* ${nuevaTarea.titulo}\n` +
+        `📍 *Ubicación:* ${nuevaTarea.ubicacion}\n` +
+        `👥 *Responsable(s):* ${nombresTecnicos}\n` +
+        `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
+        (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n\n` : '\n') +
+        `📲 *Ver en App:* https://mnttocapsec.vercel.app`
+      );
+
       setNuevaTarea({ 
         titulo: '', 
         descripcion: '', 
         ubicacion: '', 
         prioridad: 'media', 
         fecha_programada: hoyStr,
+        fecha_fin: hoyStr,
+        es_recurrente: false,
         tecnicos_seleccionados: [] 
       });
       cargarTareas();
-      alert('Orden de trabajo programada exitosamente.');
+
+      if (window.confirm('Orden generada con éxito. ¿Deseas enviar el aviso a WhatsApp ahora?')) {
+        window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
+      }
     }
   }
 
@@ -326,7 +369,13 @@ export default function App() {
     });
   }
 
+  // Filtrado de Tareas
   const tareasFiltradas = tareas.filter(t => {
+    if (usuarioActual?.rol === 'admin' && filtroTecnicoAdmin !== 'todos') {
+      const corresponde = t.tecnico_id === filtroTecnicoAdmin || t.tecnicos_ids?.includes(filtroTecnicoAdmin);
+      if (!corresponde) return false;
+    }
+
     if (filtroEstado === 'pendientes') return t.estado === 'pendiente';
     if (filtroEstado === 'en_proceso') return t.estado === 'en_proceso';
     if (filtroEstado === 'bloqueadas') return t.estado === 'bloqueada';
@@ -455,6 +504,7 @@ export default function App() {
       <main className="max-w-5xl mx-auto p-4 sm:p-6 space-y-6">
         {pestañaActiva === 'operacion' && (
           <>
+            {/* Formulario Asignación con Programación Diaria */}
             {usuarioActual?.rol === 'admin' && (
               <section className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -465,7 +515,7 @@ export default function App() {
                     <label className="font-semibold text-slate-600 block mb-1">Título de la actividad</label>
                     <input 
                       type="text" 
-                      placeholder="Ej. Montaje de auditorio o reparación de luminaria" 
+                      placeholder="Ej. Montaje y desmontaje de silletería / Cobertura de área" 
                       value={nuevaTarea.titulo}
                       onChange={e => setNuevaTarea({...nuevaTarea, titulo: e.target.value})}
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none"
@@ -473,11 +523,11 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="font-semibold text-slate-600 block mb-1">Ubicación</label>
                     <input 
                       type="text" 
-                      placeholder="Ej. Auditorio / Edificio B - Aula 102" 
+                      placeholder="Ej. Auditorio / Canchas / Edificio Central" 
                       value={nuevaTarea.ubicacion}
                       onChange={e => setNuevaTarea({...nuevaTarea, ubicacion: e.target.value})}
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none"
@@ -485,22 +535,48 @@ export default function App() {
                     />
                   </div>
 
+                  {/* PROGRAMACIÓN / RECURRENCIA DIARIA */}
                   <div>
                     <label className="font-semibold text-slate-600 block mb-1 flex items-center gap-1">
-                      <CalendarIcon className="w-3.5 h-3.5 text-blue-600" /> Fecha Programada
+                      <CalendarIcon className="w-3.5 h-3.5 text-blue-600" /> Fecha Inicio
                     </label>
                     <input 
                       type="date" 
                       value={nuevaTarea.fecha_programada}
-                      onChange={e => setNuevaTarea({...nuevaTarea, fecha_programada: e.target.value})}
+                      onChange={e => setNuevaTarea({...nuevaTarea, fecha_programada: e.target.value, fecha_fin: e.target.value > nuevaTarea.fecha_fin ? e.target.value : nuevaTarea.fecha_fin})}
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white font-medium"
                       required
                     />
                   </div>
 
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="font-semibold text-slate-600 flex items-center gap-1">
+                        <Repeat className="w-3.5 h-3.5 text-purple-600" /> ¿Repetir diaria?
+                      </label>
+                      <label className="flex items-center gap-1 text-[11px] text-purple-700 font-semibold cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={nuevaTarea.es_recurrente}
+                          onChange={e => setNuevaTarea({...nuevaTarea, es_recurrente: e.target.checked})}
+                          className="rounded accent-purple-600"
+                        />
+                        Lunes a Viernes
+                      </label>
+                    </div>
+
+                    <input 
+                      type="date" 
+                      disabled={!nuevaTarea.es_recurrente}
+                      value={nuevaTarea.fecha_fin}
+                      onChange={e => setNuevaTarea({...nuevaTarea, fecha_fin: e.target.value})}
+                      className={`w-full p-2.5 rounded-lg border focus:outline-none font-medium ${nuevaTarea.es_recurrente ? 'border-purple-300 bg-purple-50/50 text-slate-800' : 'border-slate-200 bg-slate-100 text-slate-400'}`}
+                    />
+                  </div>
+
                   <div className="sm:col-span-2">
                     <label className="font-semibold text-slate-600 block mb-1">
-                      Equipo responsable: (Selecciona 1 o más)
+                      Equipo responsable: (Selecciona 1 o más colaboradores)
                     </label>
                     <div className="flex flex-wrap gap-2 pt-1">
                       {tecnicosLista.map(t => {
@@ -528,32 +604,48 @@ export default function App() {
                     <label className="font-semibold text-slate-600 block mb-1">Instrucciones o requerimientos</label>
                     <textarea 
                       rows={2}
-                      placeholder="Detalles sobre herramientas, silletería o alcance..."
+                      placeholder="Detalles sobre herramientas, alcance o especificaciones..."
                       value={nuevaTarea.descripcion}
                       onChange={e => setNuevaTarea({...nuevaTarea, descripcion: e.target.value})}
-                      className="w-full p-2.5 border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     />
                   </div>
 
                   <button 
                     type="submit" 
-                    className="sm:col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-sm"
+                    className="sm:col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
                   >
-                    Agendar Orden de Trabajo
+                    <Send className="w-4 h-4" /> Guardar y Notificar Orden de Trabajo
                   </button>
                 </form>
               </section>
             )}
 
+            {/* Listado de Tareas con Filtro de Auditoría para Supervisor */}
             <section className="space-y-3">
-              <div className="flex justify-between items-center">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                 <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
                   <Clock className="w-4 h-4 text-slate-500" />
                   {usuarioActual?.rol === 'admin' ? 'Órdenes de Trabajo del Plantel' : 'Mis Tareas de la Semana'}
                 </h3>
-                <span className="text-xs bg-slate-200 text-slate-700 font-bold px-2.5 py-0.5 rounded-full">
-                  {tareasFiltradas.length} visibles
-                </span>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  {usuarioActual?.rol === 'admin' && (
+                    <select
+                      value={filtroTecnicoAdmin}
+                      onChange={e => setFiltroTecnicoAdmin(e.target.value)}
+                      className="text-xs bg-white border border-slate-300 font-medium px-2.5 py-1 rounded-lg focus:outline-none text-slate-700"
+                    >
+                      <option value="todos">👥 Ver todo el equipo</option>
+                      {tecnicosLista.map(t => (
+                        <option key={t.id} value={t.id}>Filtrar solo {t.nombre.split(' ')[0]}</option>
+                      ))}
+                    </select>
+                  )}
+                  <span className="text-xs bg-slate-200 text-slate-700 font-bold px-2.5 py-1 rounded-full whitespace-nowrap">
+                    {tareasFiltradas.length} órdenes
+                  </span>
+                </div>
               </div>
 
               {cargando ? (
@@ -668,6 +760,7 @@ export default function App() {
           </>
         )}
 
+        {/* ======================= PANEL EJECUTIVO ======================= */}
         {pestañaActiva === 'ejecutivo' && (
           <section className="space-y-6">
             <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -755,7 +848,7 @@ export default function App() {
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
               <h3 className="font-bold text-xs text-slate-700 mb-3 uppercase tracking-wide">
-                Desglose de Trabajos Concluidos con Evidencia ({totalCompletadasRep})
+                Desglose de Trabajos Concluidos ({totalCompletadasRep})
               </h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs border-collapse">
@@ -807,6 +900,7 @@ export default function App() {
         )}
       </main>
 
+      {/* BARRA INFERIOR DE FILTROS */}
       {pestañaActiva === 'operacion' && (
         <nav className="fixed bottom-3 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-md text-white px-3 py-2 rounded-full shadow-2xl border border-slate-700 z-40 flex items-center gap-1.5 max-w-[95vw] overflow-x-auto">
           <button 
@@ -852,6 +946,7 @@ export default function App() {
         </nav>
       )}
 
+      {/* BOTÓN FLOTANTE TÉCNICO */}
       {usuarioActual?.rol === 'tecnico' && pestañaActiva === 'operacion' && (
         <button 
           onClick={() => setModalExpres(true)}
@@ -861,6 +956,7 @@ export default function App() {
         </button>
       )}
 
+      {/* MODAL CONCLUIR */}
       {modalTerminar && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
@@ -930,6 +1026,7 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL AVANCE */}
       {modalAvance && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
@@ -1009,6 +1106,7 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL EXPRÉS */}
       {modalExpres && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
@@ -1061,6 +1159,7 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL BLOQUEO */}
       {modalBloqueo && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
