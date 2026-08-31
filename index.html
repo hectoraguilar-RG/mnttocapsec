@@ -2,12 +2,56 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+
     <title>Control de Mantenimiento</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- Iconos -->
+    <link
+      rel="icon"
+      type="image/png"
+      href="/icons/favicon.png"
+    />
+
+    <link
+      rel="apple-touch-icon"
+      href="/icons/apple-touch-icon.png"
+    />
+
+    <!-- Colores de la app -->
+    <meta name="theme-color" content="#2563eb" />
+
+    <!-- iPhone / iPad -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="default"
+    />
+    <meta
+      name="apple-mobile-web-app-title"
+      content="Mantenimiento"
+    />
+
+    <!-- Descripción -->
+    <meta
+      name="description"
+      content="Control de actividades y mantenimiento"
+    />
+
+    <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
+
   <body class="bg-slate-100 text-slate-800 antialiased">
     <div id="root"></div>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
