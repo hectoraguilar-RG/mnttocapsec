@@ -23,10 +23,7 @@ import {
   Play,
   Trash2,
   Ban,
-  RotateCcw,
-  Pause,
-  Download,
-  Maximize2
+  RotateCcw
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -70,10 +67,6 @@ export default function App() {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [pestañaActiva, setPestañaActiva] = useState('operacion');
-  const [fotoAmpliada, setFotoAmpliada] = useState(null);
-  const [installPrompt, setInstallPrompt] = useState(null);
-  const [esStandalone, setEsStandalone] = useState(false);
-  const [ahoraReloj, setAhoraReloj] = useState(Date.now());
 
   // Filtros
   const [filtroEstado, setFiltroEstado] = useState('todas');
@@ -112,7 +105,6 @@ export default function App() {
     ubicacion: '',
     prioridad: 'media',
     fecha_programada: hoyStr,
-    hora_programada: '',
     fecha_fin: hoyStr,
     es_recurrente: false,
     tecnicos_seleccionados: []
@@ -123,55 +115,6 @@ export default function App() {
     descripcion: '',
     yaResuelto: true
   });
-
-  // Reloj visual para actualizar tiempos activos sin recargar la app
-  useEffect(() => {
-    const id = setInterval(() => setAhoraReloj(Date.now()), 30000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Configuración PWA: manifest, instalación y service worker
-  useEffect(() => {
-    const manifestExistente = document.querySelector('link[rel="manifest"]');
-    if (!manifestExistente) {
-      const link = document.createElement('link');
-      link.rel = 'manifest';
-      link.href = '/manifest.webmanifest';
-      document.head.appendChild(link);
-    }
-
-    const theme = document.querySelector('meta[name="theme-color"]') || document.createElement('meta');
-    theme.name = 'theme-color';
-    theme.content = '#0f172a';
-    if (!theme.parentNode) document.head.appendChild(theme);
-
-    const appleIcon = document.querySelector('link[rel="apple-touch-icon"]') || document.createElement('link');
-    appleIcon.rel = 'apple-touch-icon';
-    appleIcon.href = '/icons/icon-192.png';
-    if (!appleIcon.parentNode) document.head.appendChild(appleIcon);
-
-    const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-    setEsStandalone(standalone);
-
-    const manejarPrompt = (e) => {
-      e.preventDefault();
-      setInstallPrompt(e);
-    };
-    window.addEventListener('beforeinstallprompt', manejarPrompt);
-
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(err => console.warn('Service Worker:', err));
-    }
-
-    return () => window.removeEventListener('beforeinstallprompt', manejarPrompt);
-  }, []);
-
-  async function instalarApp() {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    await installPrompt.userChoice;
-    setInstallPrompt(null);
-  }
 
   // 1. Cargar perfiles y detectar si el celular ya tiene un usuario guardado
   useEffect(() => {
@@ -220,26 +163,19 @@ export default function App() {
     if (!usuarioActual) return;
     setCargando(true);
 
-    const [{ data, error }, { data: sesionesData, error: errorSesiones }] = await Promise.all([
-      supabase.from('tareas').select('*').order('created_at', { ascending: false }),
-      supabase.from('sesiones_tarea').select('*').order('fecha_inicio', { ascending: true })
-    ]);
+    const { data, error } = await supabase
+      .from('tareas')
+      .select('*')
+      .order('created_at', { ascending: false });
 
     if (!error && data) {
-      if (errorSesiones) console.warn('No se pudieron cargar sesiones:', errorSesiones);
-      const sesiones = sesionesData || [];
-      const tareasConSesiones = data.map(t => ({
-        ...t,
-        _sesiones: sesiones.filter(s => s.tarea_id === t.id)
-      }));
-
       if (usuarioActual.rol === 'admin') {
-        setTareas(tareasConSesiones);
+        setTareas(data);
       } else {
         const inicioSemana = obtenerInicioSemanaActual();
         const hoy = new Date().toISOString().split('T')[0];
 
-        const filtradas = tareasConSesiones.filter(t => {
+        const filtradas = data.filter(t => {
           const fechaTarea = new Date(t.fecha_completada || t.fecha_programada);
           const esDeEstaSemana = fechaTarea >= inicioSemana;
 
@@ -281,72 +217,6 @@ export default function App() {
       img.src = event.target?.result;
     };
     reader.readAsDataURL(file);
-  }
-
-  function segundosTrabajadosTarea(tarea) {
-    return (tarea?._sesiones || []).reduce((total, sesion) => {
-      const inicio = new Date(sesion.fecha_inicio).getTime();
-      const fin = sesion.fecha_fin ? new Date(sesion.fecha_fin).getTime() : ahoraReloj;
-      if (!inicio || fin < inicio) return total;
-      return total + Math.floor((fin - inicio) / 1000);
-    }, 0);
-  }
-
-  function formatearDuracion(segundos = 0) {
-    const totalMin = Math.floor(segundos / 60);
-    const horas = Math.floor(totalMin / 60);
-    const minutos = totalMin % 60;
-    if (horas > 0) return `${horas} h ${minutos} min`;
-    if (minutos > 0) return `${minutos} min`;
-    return segundos > 0 ? '< 1 min' : '0 min';
-  }
-
-  function sesionActivaDeUsuario(tarea) {
-    return (tarea?._sesiones || []).find(s => s.tecnico_id === usuarioActual?.id && !s.fecha_fin);
-  }
-
-  function tiemposPorTecnico(tarea) {
-    const acumulado = {};
-    for (const sesion of (tarea?._sesiones || [])) {
-      const inicio = new Date(sesion.fecha_inicio).getTime();
-      const fin = sesion.fecha_fin ? new Date(sesion.fecha_fin).getTime() : ahoraReloj;
-      const seg = Math.max(0, Math.floor((fin - inicio) / 1000));
-      acumulado[sesion.tecnico_id] = (acumulado[sesion.tecnico_id] || 0) + seg;
-    }
-    return Object.entries(acumulado).map(([id, segundos]) => ({
-      id,
-      nombre: perfiles.find(p => p.id === id)?.nombre?.split(' ')[0] || 'Técnico',
-      segundos
-    }));
-  }
-
-  async function pausarTiempo(tarea) {
-    if (!usuarioActual) return;
-    const activa = sesionActivaDeUsuario(tarea);
-    if (!activa) {
-      alert('No tienes un cronómetro activo en esta actividad.');
-      return;
-    }
-
-    const motivo = window.prompt('Motivo de la pausa (por ejemplo: comida, descanso o espera breve):', 'Comida');
-    if (motivo === null) return;
-
-    const { error } = await supabase
-      .from('sesiones_tarea')
-      .update({
-        fecha_fin: new Date().toISOString(),
-        tipo_fin: 'pausa',
-        notas: motivo.trim() || 'Pausa'
-      })
-      .eq('id', activa.id);
-
-    if (error) {
-      alert(`No se pudo pausar el tiempo: ${error.message}`);
-      return;
-    }
-
-    await cargarTareas();
-    alert('Tiempo pausado. Cuando regreses, pulsa “Continuar / iniciar turno”.');
   }
 
   async function guardarFotoHistorial(tareaId, tipo, foto, comentario = '') {
@@ -639,65 +509,6 @@ export default function App() {
     cargarTareas();
   }
 
-  function formatearFechaAgenda(fechaStr) {
-    const [y, m, d] = fechaStr.split('-').map(Number);
-    return new Intl.DateTimeFormat('es-MX', {
-      weekday: 'long',
-      day: '2-digit',
-      month: 'long'
-    }).format(new Date(y, m - 1, d));
-  }
-
-  function enviarAgendaHoyWhatsApp() {
-    const hoy = new Date().toISOString().split('T')[0];
-
-    const actividadesHoy = tareas
-      .filter(t =>
-        t.fecha_programada === hoy &&
-        t.estado !== 'completada' &&
-        t.estado !== 'cancelada'
-      )
-      .sort((a, b) => {
-        const ha = a.hora_programada || '99:99:99';
-        const hb = b.hora_programada || '99:99:99';
-        return ha.localeCompare(hb);
-      });
-
-    if (actividadesHoy.length === 0) {
-      alert('No hay actividades pendientes programadas para hoy.');
-      return;
-    }
-
-    const lineas = actividadesHoy.map((t, index) => {
-      const nombres = perfiles
-        .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
-        .map(p => p.nombre.split(' ')[0])
-        .join(' + ') || 'Sin asignar';
-
-      const hora = t.hora_programada
-        ? `🕐 ${String(t.hora_programada).slice(0, 5)}`
-        : '🕐 Sin hora específica';
-
-      return (
-        `*${index + 1}. ${t.titulo}*\n` +
-        `${hora}\n` +
-        `📍 ${t.ubicacion}\n` +
-        `👥 ${nombres}` +
-        (t.descripcion ? `\n📝 ${t.descripcion}` : '')
-      );
-    });
-
-    const mensaje = encodeURIComponent(
-      `🛠️ *ACTIVIDADES PROGRAMADAS DE HOY*\n` +
-      `📅 ${formatearFechaAgenda(hoy)}\n\n` +
-      lineas.join('\n\n') +
-      `\n\n📲 *Abrir Control de Mantenimiento:*\nhttps://mnttocapsec.vercel.app`
-    );
-
-    // Sin API de pago: WhatsApp abre el selector y el administrador elige el grupo interno.
-    window.open(`https://api.whatsapp.com/send?text=${mensaje}`, '_blank');
-  }
-
   async function crearTareaProgramada(e) {
     e.preventDefault();
     if (!nuevaTarea.titulo || !nuevaTarea.ubicacion || nuevaTarea.tecnicos_seleccionados.length === 0) {
@@ -725,8 +536,7 @@ export default function App() {
         creado_por: usuarioActual?.id,
         tipo_origen: 'programada',
         estado: 'pendiente',
-        fecha_programada: d.toISOString().split('T')[0],
-        hora_programada: nuevaTarea.hora_programada || null
+        fecha_programada: d.toISOString().split('T')[0]
       });
     }
 
@@ -744,7 +554,6 @@ export default function App() {
         `📍 *Ubicación:* ${nuevaTarea.ubicacion}\n` +
         `👥 *Responsable(s):* ${nombresTecnicos}\n` +
         `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
-        (nuevaTarea.hora_programada ? `🕐 *Hora aproximada:* ${nuevaTarea.hora_programada}\n` : '') +
         (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n\n` : '\n') +
         `📲 *Ver en App:* https://mnttocapsec.vercel.app`
       );
@@ -755,7 +564,6 @@ export default function App() {
         ubicacion: '', 
         prioridad: 'media', 
         fecha_programada: hoyStr,
-        hora_programada: '',
         fecha_fin: hoyStr,
         es_recurrente: false,
         tecnicos_seleccionados: [] 
@@ -834,11 +642,6 @@ export default function App() {
   const tareasReporte = tareas.filter(t => {
     const fechaRef = new Date(t.fecha_completada || t.fecha_programada);
     const ahora = new Date();
-    const hoyReporte = ahora.toISOString().split('T')[0];
-
-    // Las tareas futuras no cuentan como pendientes ni afectan el desempeño antes de su fecha.
-    if (t.estado !== 'completada' && t.fecha_programada > hoyReporte) return false;
-    if (t.estado === 'cancelada') return false;
 
     if (tipoPeriodoReporte === 'semanal') {
       const inicioSemana = obtenerInicioSemanaActual();
@@ -995,16 +798,6 @@ export default function App() {
               </div>
             )}
 
-            {!esStandalone && installPrompt && (
-              <button
-                onClick={instalarApp}
-                className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5"
-                title="Instalar acceso directo de la app"
-              >
-                <Download className="w-3.5 h-3.5" /> Instalar app
-              </button>
-            )}
-
             {/* Perfil Activo con Botón de Salir */}
             <div className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
               <span className="text-xs font-semibold text-blue-300">
@@ -1028,18 +821,9 @@ export default function App() {
             {/* Formulario solo visible para Administrador */}
             {usuarioActual.rol === 'admin' && (
               <section className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                    <Send className="w-4 h-4 text-blue-600" /> Asignar / Programar Orden de Trabajo
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={enviarAgendaHoyWhatsApp}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 transition"
-                  >
-                    <Send className="w-4 h-4" /> Enviar lo programado hoy
-                  </button>
-                </div>
+                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <Send className="w-4 h-4 text-blue-600" /> Asignar / Programar Orden de Trabajo
+                </h2>
                 <form onSubmit={crearTareaProgramada} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="sm:col-span-2">
                     <label className="font-semibold text-slate-600 block mb-1">Título de la actividad</label>
@@ -1076,19 +860,6 @@ export default function App() {
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white font-medium"
                       required
                     />
-                  </div>
-
-                  <div>
-                    <label className="font-semibold text-slate-600 block mb-1 flex items-center gap-1">
-                      <Clock className="w-3.5 h-3.5 text-blue-600" /> Hora aproximada (opcional)
-                    </label>
-                    <input
-                      type="time"
-                      value={nuevaTarea.hora_programada}
-                      onChange={e => setNuevaTarea({...nuevaTarea, hora_programada: e.target.value})}
-                      className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white font-medium"
-                    />
-                    <p className="text-[10px] text-slate-400 mt-1">Solo referencia operativa; no se usa para evaluar puntualidad.</p>
                   </div>
 
                   <div>
@@ -1239,39 +1010,22 @@ export default function App() {
                               <span>{t.ubicacion}</span>
                             </div>
                             <span className="text-[11px] bg-slate-100 px-2 py-0.5 rounded text-slate-600">
-                              📅 {t.fecha_programada}{t.hora_programada ? ` • 🕐 ${String(t.hora_programada).slice(0, 5)}` : ''}
+                              📅 {t.fecha_programada}
                             </span>
                           </div>
-
-                          {t._sesiones?.length > 0 && (
-                            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2 text-[11px]">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-slate-700 flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> Tiempo efectivo</span>
-                                <span className="font-bold text-blue-700">{formatearDuracion(segundosTrabajadosTarea(t))}</span>
-                              </div>
-                              {usuarioActual.rol === 'admin' && tiemposPorTecnico(t).length > 0 && (
-                                <div className="mt-1 text-slate-500">
-                                  {tiemposPorTecnico(t).map(x => `${x.nombre}: ${formatearDuracion(x.segundos)}`).join(' • ')}
-                                </div>
-                              )}
-                              {sesionActivaDeUsuario(t) && (
-                                <div className="mt-1 font-semibold text-emerald-700">● Tu cronómetro está corriendo</div>
-                              )}
-                            </div>
-                          )}
 
                           {t.estado === 'completada' && (t.foto_antes || t.foto_despues) && (
                             <div className="flex gap-3 mb-3 p-2 bg-slate-50 rounded-lg border border-slate-100">
                               {t.foto_antes && (
                                 <div className="text-[10px] text-slate-500 text-center">
                                   <span className="block mb-0.5">Antes</span>
-                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_antes, titulo: `Antes • ${t.titulo}` })} className="relative group"><img src={t.foto_antes} alt="Antes" className="w-20 h-20 object-cover rounded-lg border shadow-xs cursor-zoom-in" /><Maximize2 className="absolute bottom-1 right-1 w-4 h-4 p-0.5 rounded bg-black/60 text-white opacity-80" /></button>
+                                  <img src={t.foto_antes} alt="Antes" className="w-16 h-16 object-cover rounded-lg border shadow-xs" />
                                 </div>
                               )}
                               {t.foto_despues && (
                                 <div className="text-[10px] text-slate-500 text-center">
                                   <span className="block mb-0.5">Después</span>
-                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_despues, titulo: `Después • ${t.titulo}` })} className="relative group"><img src={t.foto_despues} alt="Después" className="w-20 h-20 object-cover rounded-lg border shadow-xs cursor-zoom-in" /><Maximize2 className="absolute bottom-1 right-1 w-4 h-4 p-0.5 rounded bg-black/60 text-white opacity-80" /></button>
+                                  <img src={t.foto_despues} alt="Después" className="w-16 h-16 object-cover rounded-lg border shadow-xs" />
                                 </div>
                               )}
                             </div>
@@ -1296,25 +1050,16 @@ export default function App() {
 
                             {t.estado === 'en_proceso' && (
                               <>
-                                {!sesionActivaDeUsuario(t) ? (
-                                  <button
-                                    onClick={() => {
-                                      setModalInicio(t);
-                                      setNotasInicio('');
-                                      setFotoInicio(null);
-                                    }}
-                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                                  >
-                                    <Play className="w-4 h-4" /> Continuar / iniciar turno
-                                  </button>
-                                ) : (
-                                  <button
-                                    onClick={() => pausarTiempo(t)}
-                                    className="flex-1 bg-violet-100 hover:bg-violet-200 text-violet-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                                  >
-                                    <Pause className="w-4 h-4" /> Pausar tiempo
-                                  </button>
-                                )}
+                                <button
+                                  onClick={() => {
+                                    setModalInicio(t);
+                                    setNotasInicio('');
+                                    setFotoInicio(t.foto_antes || null);
+                                  }}
+                                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <Play className="w-4 h-4" /> Continuar / Iniciar turno
+                                </button>
 
                                 <button 
                                   onClick={() => {
@@ -1328,25 +1073,23 @@ export default function App() {
                                   <CheckCircle2 className="w-4 h-4" /> Terminar
                                 </button>
 
-                                {sesionActivaDeUsuario(t) && (
-                                  <button 
-                                    onClick={() => {
-                                      setModalAvance(t);
-                                      setFotoAvance(null);
-                                      setNotaAvance('');
-                                    }}
-                                    className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                                  >
-                                    <MessageSquareShare className="w-4 h-4" /> Avance / Relevo
-                                  </button>
-                                )}
+                                <button 
+                                  onClick={() => {
+                                    setModalAvance(t);
+                                    setFotoAvance(null);
+                                    setNotaAvance('');
+                                  }}
+                                  className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <MessageSquareShare className="w-4 h-4" /> Avance / Relevo
+                                </button>
 
                                 <button 
                                   onClick={() => setModalBloqueo(t)}
-                                  title="Bloquear actividad por material, proveedor o apoyo"
-                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center gap-1 transition"
+                                  title="Pausar por bloqueo"
+                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center transition"
                                 >
-                                  <AlertTriangle className="w-4 h-4" /> Bloquear
+                                  <AlertTriangle className="w-4 h-4" />
                                 </button>
                               </>
                             )}
@@ -1492,14 +1235,13 @@ export default function App() {
                       <th className="p-2">Origen</th>
                       <th className="p-2">Responsable(s)</th>
                       <th className="p-2">Notas de Cierre</th>
-                      <th className="p-2">Tiempo efectivo</th>
-                      <th className="p-2 text-center">Evidencias</th>
+                      <th className="p-2 text-center">Fotos</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {tareasReporte.filter(t => t.estado === 'completada').length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-4 text-center text-slate-400">
+                        <td colSpan={5} className="p-4 text-center text-slate-400">
                           Sin órdenes completadas registradas en este periodo.
                         </td>
                       </tr>
@@ -1524,27 +1266,11 @@ export default function App() {
                               </span>
                             </td>
                             <td className="p-2 font-medium text-slate-700">{nombres}</td>
-                            <td className="p-2 text-slate-600 max-w-xs">{t.notas_cierre || 'Concluido'}</td>
-                            <td className="p-2">
-                              <div className="font-bold text-slate-800">{formatearDuracion(segundosTrabajadosTarea(t))}</div>
-                              <div className="text-[9px] text-slate-500">
-                                {tiemposPorTecnico(t).map(x => `${x.nombre}: ${formatearDuracion(x.segundos)}`).join(' • ')}
-                              </div>
-                            </td>
+                            <td className="p-2 text-slate-600 max-w-xs truncate">{t.notas_cierre || 'Concluido'}</td>
                             <td className="p-2 text-center">
-                              <div className="flex justify-center gap-2 print:gap-1">
-                                {t.foto_antes && (
-                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_antes, titulo: `Antes • ${t.titulo}` })} className="print:pointer-events-none">
-                                    <span className="block text-[9px] mb-0.5 text-slate-500">Antes</span>
-                                    <img src={t.foto_antes} alt="Antes" className="w-14 h-14 object-cover rounded border cursor-zoom-in print:w-16 print:h-16" />
-                                  </button>
-                                )}
-                                {t.foto_despues && (
-                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_despues, titulo: `Después • ${t.titulo}` })} className="print:pointer-events-none">
-                                    <span className="block text-[9px] mb-0.5 text-emerald-700">Después</span>
-                                    <img src={t.foto_despues} alt="Después" className="w-14 h-14 object-cover rounded border cursor-zoom-in print:w-16 print:h-16" />
-                                  </button>
-                                )}
+                              <div className="flex justify-center gap-1">
+                                {t.foto_antes && <span className="text-[10px] bg-slate-100 px-1 rounded">Antes</span>}
+                                {t.foto_despues && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded">Después</span>}
                               </div>
                             </td>
                           </tr>
@@ -1621,19 +1347,6 @@ export default function App() {
         >
           <PlusCircle className="w-4 h-4" /> + Exprés
         </button>
-      )}
-
-      {/* VISOR DE FOTOGRAFÍAS */}
-      {fotoAmpliada && (
-        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 print:hidden" onClick={() => setFotoAmpliada(null)}>
-          <div className="max-w-5xl w-full max-h-[94vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
-            <div className="w-full flex items-center justify-between text-white">
-              <span className="text-sm font-semibold">{fotoAmpliada.titulo}</span>
-              <button onClick={() => setFotoAmpliada(null)} className="p-2 rounded-full bg-white/10 hover:bg-white/20"><X className="w-5 h-5" /></button>
-            </div>
-            <img src={fotoAmpliada.src} alt={fotoAmpliada.titulo} className="max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl" />
-          </div>
-        </div>
       )}
 
       {/* MODAL INICIAR / CONTINUAR */}
