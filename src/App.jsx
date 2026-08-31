@@ -23,7 +23,11 @@ import {
   Play,
   Trash2,
   Ban,
-  RotateCcw
+  RotateCcw,
+  Pause,
+  Download,
+  Maximize2,
+  Eye
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -67,11 +71,16 @@ export default function App() {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [pestañaActiva, setPestañaActiva] = useState('operacion');
+  const [fotoAmpliada, setFotoAmpliada] = useState(null);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [esStandalone, setEsStandalone] = useState(false);
+  const [ahoraReloj, setAhoraReloj] = useState(Date.now());
 
   // Filtros
   const [filtroEstado, setFiltroEstado] = useState('todas');
   const [filtroTecnicoAdmin, setFiltroTecnicoAdmin] = useState('todos');
   const [tipoPeriodoReporte, setTipoPeriodoReporte] = useState('semanal');
+  const [fechaReferenciaReporte, setFechaReferenciaReporte] = useState(new Date().toISOString().split('T')[0]);
 
   // Modales
   const [modalExpres, setModalExpres] = useState(false);
@@ -83,6 +92,9 @@ export default function App() {
   const [notasInicio, setNotasInicio] = useState('');
   const [fotoInicio, setFotoInicio] = useState(null);
   const [guardandoInicio, setGuardandoInicio] = useState(false);
+  const [tecnicosInicio, setTecnicosInicio] = useState([]);
+  const [modalHistorial, setModalHistorial] = useState(null);
+  const [cargandoHistorial, setCargandoHistorial] = useState(false);
 
   const [modalTerminar, setModalTerminar] = useState(null);
   const [notasCierre, setNotasCierre] = useState('');
@@ -105,6 +117,7 @@ export default function App() {
     ubicacion: '',
     prioridad: 'media',
     fecha_programada: hoyStr,
+    hora_programada: '',
     fecha_fin: hoyStr,
     es_recurrente: false,
     tecnicos_seleccionados: []
@@ -115,6 +128,55 @@ export default function App() {
     descripcion: '',
     yaResuelto: true
   });
+
+  // Reloj visual para actualizar tiempos activos sin recargar la app
+  useEffect(() => {
+    const id = setInterval(() => setAhoraReloj(Date.now()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Configuración PWA: manifest, instalación y service worker
+  useEffect(() => {
+    const manifestExistente = document.querySelector('link[rel="manifest"]');
+    if (!manifestExistente) {
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = '/manifest.webmanifest';
+      document.head.appendChild(link);
+    }
+
+    const theme = document.querySelector('meta[name="theme-color"]') || document.createElement('meta');
+    theme.name = 'theme-color';
+    theme.content = '#0f172a';
+    if (!theme.parentNode) document.head.appendChild(theme);
+
+    const appleIcon = document.querySelector('link[rel="apple-touch-icon"]') || document.createElement('link');
+    appleIcon.rel = 'apple-touch-icon';
+    appleIcon.href = '/icons/icon-192.png';
+    if (!appleIcon.parentNode) document.head.appendChild(appleIcon);
+
+    const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    setEsStandalone(standalone);
+
+    const manejarPrompt = (e) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', manejarPrompt);
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(err => console.warn('Service Worker:', err));
+    }
+
+    return () => window.removeEventListener('beforeinstallprompt', manejarPrompt);
+  }, []);
+
+  async function instalarApp() {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+  }
 
   // 1. Cargar perfiles y detectar si el celular ya tiene un usuario guardado
   useEffect(() => {
@@ -163,19 +225,26 @@ export default function App() {
     if (!usuarioActual) return;
     setCargando(true);
 
-    const { data, error } = await supabase
-      .from('tareas')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const [{ data, error }, { data: sesionesData, error: errorSesiones }] = await Promise.all([
+      supabase.from('tareas').select('*').order('created_at', { ascending: false }),
+      supabase.from('sesiones_tarea').select('*').order('fecha_inicio', { ascending: true })
+    ]);
 
     if (!error && data) {
+      if (errorSesiones) console.warn('No se pudieron cargar sesiones:', errorSesiones);
+      const sesiones = sesionesData || [];
+      const tareasConSesiones = data.map(t => ({
+        ...t,
+        _sesiones: sesiones.filter(s => s.tarea_id === t.id)
+      }));
+
       if (usuarioActual.rol === 'admin') {
-        setTareas(data);
+        setTareas(tareasConSesiones);
       } else {
         const inicioSemana = obtenerInicioSemanaActual();
         const hoy = new Date().toISOString().split('T')[0];
 
-        const filtradas = data.filter(t => {
+        const filtradas = tareasConSesiones.filter(t => {
           const fechaTarea = new Date(t.fecha_completada || t.fecha_programada);
           const esDeEstaSemana = fechaTarea >= inicioSemana;
 
@@ -217,6 +286,131 @@ export default function App() {
       img.src = event.target?.result;
     };
     reader.readAsDataURL(file);
+  }
+
+  function segundosTrabajadosTarea(tarea) {
+    const idsTecnicos = new Set(perfiles.filter(p => p.rol === 'tecnico').map(p => p.id));
+    return (tarea?._sesiones || []).reduce((total, sesion) => {
+      if (!idsTecnicos.has(sesion.tecnico_id)) return total;
+      const inicio = new Date(sesion.fecha_inicio).getTime();
+      const fin = sesion.fecha_fin ? new Date(sesion.fecha_fin).getTime() : ahoraReloj;
+      if (!inicio || fin < inicio) return total;
+      return total + Math.floor((fin - inicio) / 1000);
+    }, 0);
+  }
+
+  function formatearDuracion(segundos = 0) {
+    const totalMin = Math.floor(segundos / 60);
+    const horas = Math.floor(totalMin / 60);
+    const minutos = totalMin % 60;
+    if (horas > 0) return `${horas} h ${minutos} min`;
+    if (minutos > 0) return `${minutos} min`;
+    return segundos > 0 ? '< 1 min' : '0 min';
+  }
+
+  function sesionActivaDeUsuario(tarea) {
+    if (usuarioActual?.rol !== 'tecnico') return null;
+    return (tarea?._sesiones || []).find(s => s.tecnico_id === usuarioActual?.id && !s.fecha_fin);
+  }
+
+  function tecnicosAsignadosTarea(tarea) {
+    const ids = Array.from(new Set([...(tarea?.tecnicos_ids || []), ...(tarea?.tecnico_id ? [tarea.tecnico_id] : [])]));
+    return perfiles.filter(p => p.rol === 'tecnico' && ids.includes(p.id));
+  }
+
+  function tiemposPorTecnico(tarea) {
+    const idsTecnicos = new Set(perfiles.filter(p => p.rol === 'tecnico').map(p => p.id));
+    const acumulado = {};
+    for (const sesion of (tarea?._sesiones || [])) {
+      if (!idsTecnicos.has(sesion.tecnico_id)) continue;
+      const inicio = new Date(sesion.fecha_inicio).getTime();
+      const fin = sesion.fecha_fin ? new Date(sesion.fecha_fin).getTime() : ahoraReloj;
+      const seg = Math.max(0, Math.floor((fin - inicio) / 1000));
+      acumulado[sesion.tecnico_id] = (acumulado[sesion.tecnico_id] || 0) + seg;
+    }
+    return Object.entries(acumulado).map(([id, segundos]) => ({
+      id,
+      nombre: perfiles.find(p => p.id === id)?.nombre?.split(' ')[0] || 'Técnico',
+      segundos
+    }));
+  }
+
+  function duracionRealTarea(tarea) {
+    const sesionesTecnicos = (tarea?._sesiones || []).filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico');
+    if (sesionesTecnicos.length === 0) return 0;
+    const inicios = sesionesTecnicos.map(s => new Date(s.fecha_inicio).getTime()).filter(Number.isFinite);
+    const inicio = Math.min(...inicios);
+    const fin = tarea?.fecha_fin
+      ? new Date(tarea.fecha_fin).getTime()
+      : tarea?.fecha_completada
+        ? new Date(tarea.fecha_completada).getTime()
+        : ahoraReloj;
+    return Math.max(0, Math.floor((fin - inicio) / 1000));
+  }
+
+  function abrirInicio(tarea) {
+    setModalInicio(tarea);
+    setNotasInicio('');
+    setFotoInicio(tarea.estado === 'pendiente' || tarea.estado === 'bloqueada' ? (tarea.foto_antes || null) : null);
+    if (tarea.estado === 'pendiente' || tarea.estado === 'bloqueada') {
+      setTecnicosInicio(tecnicosAsignadosTarea(tarea).map(t => t.id));
+    } else if (usuarioActual?.rol === 'tecnico') {
+      setTecnicosInicio([usuarioActual.id]);
+    } else {
+      setTecnicosInicio([]);
+    }
+  }
+
+  function alternarTecnicoInicio(id) {
+    setTecnicosInicio(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  }
+
+  async function abrirHistorial(tarea) {
+    setCargandoHistorial(true);
+    setModalHistorial({ tarea, sesiones: [], avances: [], bloqueos: [], fotos: [] });
+    const [sesionesR, avancesR, bloqueosR, fotosR] = await Promise.all([
+      supabase.from('sesiones_tarea').select('*').eq('tarea_id', tarea.id).order('fecha_inicio', { ascending: true }),
+      supabase.from('avances_tarea').select('*').eq('tarea_id', tarea.id),
+      supabase.from('bloqueos_tarea').select('*').eq('tarea_id', tarea.id),
+      supabase.from('fotos_tarea').select('*').eq('tarea_id', tarea.id)
+    ]);
+    setModalHistorial({
+      tarea,
+      sesiones: sesionesR.data || [],
+      avances: avancesR.data || [],
+      bloqueos: bloqueosR.data || [],
+      fotos: fotosR.data || []
+    });
+    setCargandoHistorial(false);
+  }
+
+  async function pausarTiempo(tarea) {
+    if (!usuarioActual) return;
+    const activa = sesionActivaDeUsuario(tarea);
+    if (!activa) {
+      alert('No tienes un cronómetro activo en esta actividad.');
+      return;
+    }
+
+    const motivo = window.prompt('Motivo de la pausa (por ejemplo: comida, descanso o espera breve):', 'Comida');
+    if (motivo === null) return;
+
+    const { error } = await supabase
+      .from('sesiones_tarea')
+      .update({
+        fecha_fin: new Date().toISOString(),
+        tipo_fin: 'pausa',
+        notas: motivo.trim() || 'Pausa'
+      })
+      .eq('id', activa.id);
+
+    if (error) {
+      alert(`No se pudo pausar el tiempo: ${error.message}`);
+      return;
+    }
+
+    await cargarTareas();
+    alert('Tiempo pausado. Cuando regreses, pulsa “Continuar / iniciar turno”.');
   }
 
   async function guardarFotoHistorial(tareaId, tipo, foto, comentario = '') {
@@ -269,19 +463,23 @@ export default function App() {
     setGuardandoInicio(true);
 
     const ahora = new Date().toISOString();
+    const esInicioEquipo = modalInicio.estado === 'pendiente' || modalInicio.estado === 'bloqueada';
 
-    const { data: sesionesAbiertas, error: errorSesiones } = await supabase
-      .from('sesiones_tarea')
-      .select('id')
-      .eq('tarea_id', modalInicio.id)
-      .eq('tecnico_id', usuarioActual.id)
-      .is('fecha_fin', null)
-      .limit(1);
-
-    if (errorSesiones) {
-      setGuardandoInicio(false);
-      alert('No se pudo comprobar el registro de tiempo.');
-      return;
+    let idsAIniciar = [];
+    if (esInicioEquipo) {
+      idsAIniciar = tecnicosInicio.filter(id => perfiles.find(p => p.id === id)?.rol === 'tecnico');
+      if (idsAIniciar.length === 0) {
+        setGuardandoInicio(false);
+        alert('Selecciona al menos a un técnico que vaya a participar.');
+        return;
+      }
+    } else {
+      if (usuarioActual.rol !== 'tecnico') {
+        setGuardandoInicio(false);
+        alert('Como administrador puedes revisar la actividad, pero tu tiempo no se registra.');
+        return;
+      }
+      idsAIniciar = [usuarioActual.id];
     }
 
     const datosTarea = {
@@ -290,7 +488,7 @@ export default function App() {
     };
 
     if (!modalInicio.fecha_inicio) datosTarea.fecha_inicio = ahora;
-    if (!modalInicio.iniciado_por) datosTarea.iniciado_por = usuarioActual.id;
+    if (!modalInicio.iniciado_por) datosTarea.iniciado_por = idsAIniciar[0] || null;
     if (fotoInicio) datosTarea.foto_antes = fotoInicio;
 
     const { error: errorTarea } = await supabase
@@ -304,32 +502,59 @@ export default function App() {
       return;
     }
 
-    if (!sesionesAbiertas || sesionesAbiertas.length === 0) {
-      const { error: errorSesion } = await supabase.from('sesiones_tarea').insert({
-        tarea_id: modalInicio.id,
-        tecnico_id: usuarioActual.id,
-        fecha_inicio: ahora,
-        notas: notasInicio || null
-      });
+    const { data: abiertas, error: errorAbiertas } = await supabase
+      .from('sesiones_tarea')
+      .select('tecnico_id')
+      .eq('tarea_id', modalInicio.id)
+      .is('fecha_fin', null);
 
+    if (errorAbiertas) {
+      setGuardandoInicio(false);
+      alert(`La actividad cambió a En proceso, pero no se pudieron revisar los cronómetros: ${errorAbiertas.message}`);
+      await cargarTareas();
+      return;
+    }
+
+    const abiertos = new Set((abiertas || []).map(s => s.tecnico_id));
+    const nuevasSesiones = idsAIniciar
+      .filter(id => !abiertos.has(id))
+      .map(id => ({
+        tarea_id: modalInicio.id,
+        tecnico_id: id,
+        fecha_inicio: ahora,
+        notas: esInicioEquipo ? (notasInicio || 'Inicio de equipo') : (notasInicio || 'Continuación individual')
+      }));
+
+    if (nuevasSesiones.length > 0) {
+      const { error: errorSesion } = await supabase.from('sesiones_tarea').insert(nuevasSesiones);
       if (errorSesion) {
         setGuardandoInicio(false);
-        alert(`La actividad cambió a En proceso, pero no se pudo registrar el tiempo: ${errorSesion.message}`);
-        cargarTareas();
+        alert(`La actividad inició, pero no se pudieron abrir todos los cronómetros: ${errorSesion.message}`);
+        await cargarTareas();
         return;
       }
     }
 
     if (fotoInicio) {
-      await guardarFotoHistorial(modalInicio.id, 'antes', fotoInicio, notasInicio);
+      // La evidencia pertenece a la orden; si inicia el admin, se guarda sin convertirlo en tiempo de trabajo.
+      const tecnicoFoto = usuarioActual.rol === 'tecnico' ? usuarioActual.id : (idsAIniciar[0] || null);
+      const { error: errorFoto } = await supabase.from('fotos_tarea').insert({
+        tarea_id: modalInicio.id,
+        tecnico_id: tecnicoFoto,
+        tipo: 'antes',
+        url: fotoInicio,
+        comentario: notasInicio || null
+      });
+      if (errorFoto) console.error('Error guardando foto inicial:', errorFoto);
     }
 
     setGuardandoInicio(false);
     setModalInicio(null);
     setNotasInicio('');
     setFotoInicio(null);
-    cargarTareas();
-    alert('Actividad iniciada. El tiempo comenzó a registrarse.');
+    setTecnicosInicio([]);
+    await cargarTareas();
+    alert(esInicioEquipo ? 'Actividad iniciada. Se abrió el tiempo para el equipo seleccionado.' : 'Tu tiempo volvió a iniciar.');
   }
 
   async function cancelarTarea(tarea) {
@@ -509,8 +734,69 @@ export default function App() {
     cargarTareas();
   }
 
+  function formatearFechaAgenda(fechaStr) {
+    const [y, m, d] = fechaStr.split('-').map(Number);
+    return new Intl.DateTimeFormat('es-MX', {
+      weekday: 'long',
+      day: '2-digit',
+      month: 'long'
+    }).format(new Date(y, m - 1, d));
+  }
+
+  function enviarAgendaHoyWhatsApp() {
+    const hoy = new Date().toISOString().split('T')[0];
+
+    const actividadesHoy = tareas
+      .filter(t =>
+        t.fecha_programada === hoy &&
+        t.estado !== 'completada' &&
+        t.estado !== 'cancelada'
+      )
+      .sort((a, b) => {
+        const ha = a.hora_programada || '99:99:99';
+        const hb = b.hora_programada || '99:99:99';
+        return ha.localeCompare(hb);
+      });
+
+    if (actividadesHoy.length === 0) {
+      alert('No hay actividades pendientes programadas para hoy.');
+      return;
+    }
+
+    const lineas = actividadesHoy.map((t, index) => {
+      const nombres = perfiles
+        .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
+        .map(p => p.nombre.split(' ')[0])
+        .join(' + ') || 'Sin asignar';
+
+      const hora = t.hora_programada
+        ? `🕐 ${String(t.hora_programada).slice(0, 5)}`
+        : '🕐 Sin hora específica';
+
+      return (
+        `*${index + 1}. ${t.titulo}*\n` +
+        `${hora}\n` +
+        `📍 ${t.ubicacion}\n` +
+        `👥 ${nombres}` +
+        (t.descripcion ? `\n📝 ${t.descripcion}` : '')
+      );
+    });
+
+    const mensaje = encodeURIComponent(
+      `🛠️ *ACTIVIDADES PROGRAMADAS DE HOY*\n` +
+      `📅 ${formatearFechaAgenda(hoy)}\n\n` +
+      lineas.join('\n\n') +
+      `\n\n📲 *Abrir Control de Mantenimiento:*\nhttps://mnttocapsec.vercel.app`
+    );
+
+    // Sin API de pago: WhatsApp abre el selector y el administrador elige el grupo interno.
+    window.open(`https://api.whatsapp.com/send?text=${mensaje}`, '_blank');
+  }
+
   async function crearTareaProgramada(e) {
     e.preventDefault();
+    const accion = e.nativeEvent?.submitter?.value || 'guardar';
+    const notificarAhora = accion === 'guardar_notificar';
     if (!nuevaTarea.titulo || !nuevaTarea.ubicacion || nuevaTarea.tecnicos_seleccionados.length === 0) {
       alert('Completa los campos requeridos y selecciona al menos a un técnico.');
       return;
@@ -536,7 +822,8 @@ export default function App() {
         creado_por: usuarioActual?.id,
         tipo_origen: 'programada',
         estado: 'pendiente',
-        fecha_programada: d.toISOString().split('T')[0]
+        fecha_programada: d.toISOString().split('T')[0],
+        hora_programada: nuevaTarea.hora_programada || null
       });
     }
 
@@ -554,6 +841,7 @@ export default function App() {
         `📍 *Ubicación:* ${nuevaTarea.ubicacion}\n` +
         `👥 *Responsable(s):* ${nombresTecnicos}\n` +
         `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
+        (nuevaTarea.hora_programada ? `🕐 *Hora aproximada:* ${nuevaTarea.hora_programada}\n` : '') +
         (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n\n` : '\n') +
         `📲 *Ver en App:* https://mnttocapsec.vercel.app`
       );
@@ -564,13 +852,14 @@ export default function App() {
         ubicacion: '', 
         prioridad: 'media', 
         fecha_programada: hoyStr,
+        hora_programada: '',
         fecha_fin: hoyStr,
         es_recurrente: false,
         tecnicos_seleccionados: [] 
       });
       cargarTareas();
 
-      if (window.confirm('Orden generada con éxito. ¿Deseas abrir WhatsApp con el aviso preparado?')) {
+      if (notificarAhora) {
         const tecnicosSeleccionados = perfiles.filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id));
 
         if (tecnicosSeleccionados.length === 1 && tecnicosSeleccionados[0].telefono) {
@@ -578,10 +867,11 @@ export default function App() {
           const telefonoMexico = telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`;
           window.open(`https://wa.me/${telefonoMexico}?text=${mensajeWhatsApp}`, '_blank');
         } else {
-          // Para equipos de varias personas, WhatsApp no permite enviar automáticamente a varios chats sin API.
-          // Se abre el selector para que el supervisor elija el chat o grupo correspondiente.
+          // Para equipos de varias personas se abre el selector para elegir el grupo/chat interno.
           window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
         }
+      } else {
+        alert('Actividad guardada. No se envió aviso por WhatsApp.');
       }
     }
   }
@@ -637,28 +927,72 @@ export default function App() {
   });
 
   const fechaActual = new Date();
-  const numeroSemana = obtenerNumeroSemana(fechaActual);
+  const hoyReporteStr = fechaActual.toISOString().split('T')[0];
 
-  const tareasReporte = tareas.filter(t => {
-    const fechaRef = new Date(t.fecha_completada || t.fecha_programada);
-    const ahora = new Date();
+  function fechaLocalDesdeISO(fechaStr) {
+    const [y, m, d] = String(fechaStr || hoyReporteStr).split('-').map(Number);
+    const fecha = new Date(y, (m || 1) - 1, d || 1);
+    fecha.setHours(0, 0, 0, 0);
+    return fecha;
+  }
+
+  function isoFechaLocal(fecha) {
+    const y = fecha.getFullYear();
+    const m = String(fecha.getMonth() + 1).padStart(2, '0');
+    const d = String(fecha.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const referenciaReporte = fechaLocalDesdeISO(fechaReferenciaReporte);
+  const numeroSemana = obtenerNumeroSemana(referenciaReporte);
+
+  function limitesPeriodoReporte() {
+    const ref = new Date(referenciaReporte);
+    let inicio;
+    let fin;
 
     if (tipoPeriodoReporte === 'semanal') {
-      const inicioSemana = obtenerInicioSemanaActual();
-      return fechaRef >= inicioSemana;
+      const dia = ref.getDay();
+      const ajusteLunes = dia === 0 ? -6 : 1 - dia;
+      inicio = new Date(ref);
+      inicio.setDate(ref.getDate() + ajusteLunes);
+      fin = new Date(inicio);
+      fin.setDate(inicio.getDate() + 6);
     } else if (tipoPeriodoReporte === 'quincenal') {
-      const dias15Atras = new Date();
-      dias15Atras.setDate(ahora.getDate() - 15);
-      return fechaRef >= dias15Atras;
+      const esPrimera = ref.getDate() <= 15;
+      inicio = new Date(ref.getFullYear(), ref.getMonth(), esPrimera ? 1 : 16);
+      fin = esPrimera
+        ? new Date(ref.getFullYear(), ref.getMonth(), 15)
+        : new Date(ref.getFullYear(), ref.getMonth() + 1, 0);
     } else {
-      return fechaRef.getMonth() === ahora.getMonth() && fechaRef.getFullYear() === ahora.getFullYear();
+      inicio = new Date(ref.getFullYear(), ref.getMonth(), 1);
+      fin = new Date(ref.getFullYear(), ref.getMonth() + 1, 0);
     }
+
+    inicio.setHours(0, 0, 0, 0);
+    fin.setHours(23, 59, 59, 999);
+    return { inicio, fin };
+  }
+
+  const { inicio: inicioPeriodoReporte, fin: finPeriodoReporte } = limitesPeriodoReporte();
+
+  const tareasReporte = tareas.filter(t => {
+    if (t.estado === 'cancelada') return false;
+
+    // Las actividades futuras no afectan el desempeño antes de que llegue su fecha.
+    if (t.estado !== 'completada' && t.fecha_programada > hoyReporteStr) return false;
+
+    const fechaBase = t.estado === 'completada' && t.fecha_completada
+      ? new Date(t.fecha_completada)
+      : fechaLocalDesdeISO(t.fecha_programada);
+
+    return fechaBase >= inicioPeriodoReporte && fechaBase <= finPeriodoReporte;
   });
 
   const totalCompletadasRep = tareasReporte.filter(t => t.estado === 'completada').length;
   const totalExpresRep = tareasReporte.filter(t => t.tipo_origen === 'en_recorrido').length;
   const totalBloqueadasRep = tareasReporte.filter(t => t.estado === 'bloqueada').length;
-  const totalPendientesRep = tareasReporte.filter(t => t.estado !== 'completada').length;
+  const totalPendientesRep = tareasReporte.filter(t => ['pendiente', 'en_proceso', 'bloqueada'].includes(t.estado)).length;
 
   const tecnicosLista = perfiles.filter(p => p.rol === 'tecnico');
 
@@ -673,7 +1007,7 @@ export default function App() {
       },
       {
         label: 'Pendientes / En Proceso',
-        data: tecnicosLista.map(t => tareasReporte.filter(tar => (tar.tecnico_id === t.id || tar.tecnicos_ids?.includes(t.id)) && tar.estado !== 'completada').length),
+        data: tecnicosLista.map(t => tareasReporte.filter(tar => (tar.tecnico_id === t.id || tar.tecnicos_ids?.includes(t.id)) && ['pendiente', 'en_proceso', 'bloqueada'].includes(tar.estado)).length),
         backgroundColor: '#3b82f6',
         borderRadius: 4
       }
@@ -716,11 +1050,13 @@ export default function App() {
   };
 
   const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
-  const etiquetaPeriodo = tipoPeriodoReporte === 'semanal' 
-    ? `Reporte Semanal • Semana ${numeroSemana} (${meses[fechaActual.getMonth()]} ${fechaActual.getFullYear()})`
+  const formatoCorto = new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+
+  const etiquetaPeriodo = tipoPeriodoReporte === 'semanal'
+    ? `Reporte Semanal • Semana ${numeroSemana} • ${formatoCorto.format(inicioPeriodoReporte)} al ${formatoCorto.format(finPeriodoReporte)}`
     : tipoPeriodoReporte === 'quincenal'
-    ? `Reporte Quincenal • Últimos 15 días (${meses[fechaActual.getMonth()]} ${fechaActual.getFullYear()})`
-    : `Reporte Mensual • Mes de ${meses[fechaActual.getMonth()]} ${fechaActual.getFullYear()}`;
+    ? `Reporte Quincenal • ${formatoCorto.format(inicioPeriodoReporte)} al ${formatoCorto.format(finPeriodoReporte)}`
+    : `Reporte Mensual • ${meses[referenciaReporte.getMonth()]} ${referenciaReporte.getFullYear()}`;
 
   // ===================== PANTALLA INICIAL DE SELECCIÓN =====================
   if (!usuarioActual) {
@@ -798,6 +1134,16 @@ export default function App() {
               </div>
             )}
 
+            {!esStandalone && installPrompt && (
+              <button
+                onClick={instalarApp}
+                className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5"
+                title="Instalar acceso directo de la app"
+              >
+                <Download className="w-3.5 h-3.5" /> Instalar app
+              </button>
+            )}
+
             {/* Perfil Activo con Botón de Salir */}
             <div className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
               <span className="text-xs font-semibold text-blue-300">
@@ -821,9 +1167,18 @@ export default function App() {
             {/* Formulario solo visible para Administrador */}
             {usuarioActual.rol === 'admin' && (
               <section className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <Send className="w-4 h-4 text-blue-600" /> Asignar / Programar Orden de Trabajo
-                </h2>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                    <Send className="w-4 h-4 text-blue-600" /> Asignar / Programar Orden de Trabajo
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={enviarAgendaHoyWhatsApp}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 transition"
+                  >
+                    <Send className="w-4 h-4" /> Enviar lo programado hoy
+                  </button>
+                </div>
                 <form onSubmit={crearTareaProgramada} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="sm:col-span-2">
                     <label className="font-semibold text-slate-600 block mb-1">Título de la actividad</label>
@@ -860,6 +1215,19 @@ export default function App() {
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white font-medium"
                       required
                     />
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-600 block mb-1 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-blue-600" /> Hora aproximada (opcional)
+                    </label>
+                    <input
+                      type="time"
+                      value={nuevaTarea.hora_programada}
+                      onChange={e => setNuevaTarea({...nuevaTarea, hora_programada: e.target.value})}
+                      className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white font-medium"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Solo referencia operativa; no se usa para evaluar puntualidad.</p>
                   </div>
 
                   <div>
@@ -924,12 +1292,22 @@ export default function App() {
                     />
                   </div>
 
-                  <button 
-                    type="submit" 
-                    className="sm:col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
-                  >
-                    <Send className="w-4 h-4" /> Guardar y Notificar Orden de Trabajo
-                  </button>
+                  <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="submit"
+                      value="guardar"
+                      className="bg-slate-700 hover:bg-slate-800 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4" /> Guardar sin notificar
+                    </button>
+                    <button
+                      type="submit"
+                      value="guardar_notificar"
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
+                    >
+                      <Send className="w-4 h-4" /> Guardar y notificar ahora
+                    </button>
+                  </div>
                 </form>
               </section>
             )}
@@ -1010,22 +1388,43 @@ export default function App() {
                               <span>{t.ubicacion}</span>
                             </div>
                             <span className="text-[11px] bg-slate-100 px-2 py-0.5 rounded text-slate-600">
-                              📅 {t.fecha_programada}
+                              📅 {t.fecha_programada}{t.hora_programada ? ` • 🕐 ${String(t.hora_programada).slice(0, 5)}` : ''}
                             </span>
                           </div>
+
+                          {t._sesiones?.length > 0 && tiemposPorTecnico(t).length > 0 && (
+                            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2 text-[11px] space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-bold text-slate-700 flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> Duración de la actividad</span>
+                                <span className="font-bold text-slate-700">{formatearDuracion(duracionRealTarea(t))}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-bold text-slate-700 flex items-center gap-1"><Users className="w-3.5 h-3.5" /> Tiempo efectivo del equipo</span>
+                                <span className="font-bold text-blue-700">{formatearDuracion(tiemposPorTecnico(t).reduce((a, x) => a + x.segundos, 0))} persona</span>
+                              </div>
+                              {usuarioActual.rol === 'admin' && (
+                                <div className="mt-1 text-slate-500">
+                                  {tiemposPorTecnico(t).map(x => `${x.nombre}: ${formatearDuracion(x.segundos)}`).join(' • ')}
+                                </div>
+                              )}
+                              {sesionActivaDeUsuario(t) && (
+                                <div className="mt-1 font-semibold text-emerald-700">● Tu cronómetro está corriendo</div>
+                              )}
+                            </div>
+                          )}
 
                           {t.estado === 'completada' && (t.foto_antes || t.foto_despues) && (
                             <div className="flex gap-3 mb-3 p-2 bg-slate-50 rounded-lg border border-slate-100">
                               {t.foto_antes && (
                                 <div className="text-[10px] text-slate-500 text-center">
                                   <span className="block mb-0.5">Antes</span>
-                                  <img src={t.foto_antes} alt="Antes" className="w-16 h-16 object-cover rounded-lg border shadow-xs" />
+                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_antes, titulo: `Antes • ${t.titulo}` })} className="relative group"><img src={t.foto_antes} alt="Antes" className="w-20 h-20 object-cover rounded-lg border shadow-xs cursor-zoom-in" /><Maximize2 className="absolute bottom-1 right-1 w-4 h-4 p-0.5 rounded bg-black/60 text-white opacity-80" /></button>
                                 </div>
                               )}
                               {t.foto_despues && (
                                 <div className="text-[10px] text-slate-500 text-center">
                                   <span className="block mb-0.5">Después</span>
-                                  <img src={t.foto_despues} alt="Después" className="w-16 h-16 object-cover rounded-lg border shadow-xs" />
+                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_despues, titulo: `Después • ${t.titulo}` })} className="relative group"><img src={t.foto_despues} alt="Después" className="w-20 h-20 object-cover rounded-lg border shadow-xs cursor-zoom-in" /><Maximize2 className="absolute bottom-1 right-1 w-4 h-4 p-0.5 rounded bg-black/60 text-white opacity-80" /></button>
                                 </div>
                               )}
                             </div>
@@ -1034,32 +1433,36 @@ export default function App() {
 
                         {t.estado !== 'completada' && t.estado !== 'cancelada' && (
                           <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-                            {(t.estado === 'pendiente' || t.estado === 'bloqueada') && (
+                            {(t.estado === 'pendiente' || t.estado === 'bloqueada') &&
+                              (usuarioActual.rol === 'admin' || t.tecnicos_ids?.includes(usuarioActual.id) || t.tecnico_id === usuarioActual.id) && (
                               <button
-                                onClick={() => {
-                                  setModalInicio(t);
-                                  setNotasInicio('');
-                                  setFotoInicio(t.foto_antes || null);
-                                }}
+                                onClick={() => abrirInicio(t)}
                                 className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
                               >
                                 {t.estado === 'bloqueada' ? <RotateCcw className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                                {t.estado === 'bloqueada' ? ' Reanudar' : ' Iniciar actividad'}
+                                {t.estado === 'bloqueada' ? ' Reanudar equipo' : ' Iniciar actividad'}
                               </button>
                             )}
 
                             {t.estado === 'en_proceso' && (
                               <>
-                                <button
-                                  onClick={() => {
-                                    setModalInicio(t);
-                                    setNotasInicio('');
-                                    setFotoInicio(t.foto_antes || null);
-                                  }}
-                                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                                >
-                                  <Play className="w-4 h-4" /> Continuar / Iniciar turno
-                                </button>
+                                {usuarioActual.rol === 'tecnico' && (
+                                  !sesionActivaDeUsuario(t) ? (
+                                    <button
+                                      onClick={() => abrirInicio(t)}
+                                      className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                    >
+                                      <Play className="w-4 h-4" /> Continuar mi tiempo
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => pausarTiempo(t)}
+                                      className="flex-1 bg-violet-100 hover:bg-violet-200 text-violet-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                    >
+                                      <Pause className="w-4 h-4" /> Pausar mi tiempo
+                                    </button>
+                                  )
+                                )}
 
                                 <button 
                                   onClick={() => {
@@ -1070,26 +1473,28 @@ export default function App() {
                                   }}
                                   className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
                                 >
-                                  <CheckCircle2 className="w-4 h-4" /> Terminar
+                                  <CheckCircle2 className="w-4 h-4" /> Terminar para todos
                                 </button>
 
-                                <button 
-                                  onClick={() => {
-                                    setModalAvance(t);
-                                    setFotoAvance(null);
-                                    setNotaAvance('');
-                                  }}
-                                  className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                                >
-                                  <MessageSquareShare className="w-4 h-4" /> Avance / Relevo
-                                </button>
+                                {usuarioActual.rol === 'tecnico' && sesionActivaDeUsuario(t) && (
+                                  <button 
+                                    onClick={() => {
+                                      setModalAvance(t);
+                                      setFotoAvance(null);
+                                      setNotaAvance('');
+                                    }}
+                                    className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                  >
+                                    <MessageSquareShare className="w-4 h-4" /> Avance / Relevo
+                                  </button>
+                                )}
 
                                 <button 
                                   onClick={() => setModalBloqueo(t)}
-                                  title="Pausar por bloqueo"
-                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center transition"
+                                  title="Bloquear actividad por material, proveedor o apoyo"
+                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold py-2 px-2 rounded-lg flex items-center justify-center gap-1 transition"
                                 >
-                                  <AlertTriangle className="w-4 h-4" />
+                                  <AlertTriangle className="w-4 h-4" /> Bloquear
                                 </button>
                               </>
                             )}
@@ -1127,6 +1532,16 @@ export default function App() {
                               </button>
                             )}
                           </div>
+                        )}
+
+
+                        {usuarioActual.rol === 'admin' && (
+                          <button
+                            onClick={() => abrirHistorial(t)}
+                            className="mt-2 w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition print:hidden"
+                          >
+                            <Eye className="w-4 h-4" /> Ver detalle / historial
+                          </button>
                         )}
                       </div>
                     );
@@ -1168,6 +1583,27 @@ export default function App() {
                     className={`px-3 py-1.5 rounded-lg transition ${tipoPeriodoReporte === 'mensual' ? 'bg-white shadow-xs text-blue-600' : 'text-slate-500'}`}
                   >
                     Mensual
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5">
+                  <CalendarIcon className="w-4 h-4 text-slate-500" />
+                  <div>
+                    <p className="text-[9px] uppercase tracking-wide text-slate-400 font-bold leading-none mb-1">Periodo de referencia</p>
+                    <input
+                      type="date"
+                      value={fechaReferenciaReporte}
+                      onChange={e => setFechaReferenciaReporte(e.target.value)}
+                      className="text-xs font-semibold text-slate-700 bg-transparent focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFechaReferenciaReporte(hoyReporteStr)}
+                    className="text-[10px] font-bold text-blue-600 hover:text-blue-800 px-1"
+                    title="Volver al periodo actual"
+                  >
+                    Hoy
                   </button>
                 </div>
 
@@ -1235,13 +1671,14 @@ export default function App() {
                       <th className="p-2">Origen</th>
                       <th className="p-2">Responsable(s)</th>
                       <th className="p-2">Notas de Cierre</th>
-                      <th className="p-2 text-center">Fotos</th>
+                      <th className="p-2">Tiempo efectivo</th>
+                      <th className="p-2 text-center">Evidencias</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {tareasReporte.filter(t => t.estado === 'completada').length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="p-4 text-center text-slate-400">
+                        <td colSpan={6} className="p-4 text-center text-slate-400">
                           Sin órdenes completadas registradas en este periodo.
                         </td>
                       </tr>
@@ -1266,11 +1703,27 @@ export default function App() {
                               </span>
                             </td>
                             <td className="p-2 font-medium text-slate-700">{nombres}</td>
-                            <td className="p-2 text-slate-600 max-w-xs truncate">{t.notas_cierre || 'Concluido'}</td>
+                            <td className="p-2 text-slate-600 max-w-xs">{t.notas_cierre || 'Concluido'}</td>
+                            <td className="p-2">
+                              <div className="font-bold text-slate-800">{formatearDuracion(segundosTrabajadosTarea(t))}</div>
+                              <div className="text-[9px] text-slate-500">
+                                {tiemposPorTecnico(t).map(x => `${x.nombre}: ${formatearDuracion(x.segundos)}`).join(' • ')}
+                              </div>
+                            </td>
                             <td className="p-2 text-center">
-                              <div className="flex justify-center gap-1">
-                                {t.foto_antes && <span className="text-[10px] bg-slate-100 px-1 rounded">Antes</span>}
-                                {t.foto_despues && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded">Después</span>}
+                              <div className="flex justify-center gap-2 print:gap-1">
+                                {t.foto_antes && (
+                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_antes, titulo: `Antes • ${t.titulo}` })} className="print:pointer-events-none">
+                                    <span className="block text-[9px] mb-0.5 text-slate-500">Antes</span>
+                                    <img src={t.foto_antes} alt="Antes" className="w-14 h-14 object-cover rounded border cursor-zoom-in print:w-16 print:h-16" />
+                                  </button>
+                                )}
+                                {t.foto_despues && (
+                                  <button type="button" onClick={() => setFotoAmpliada({ src: t.foto_despues, titulo: `Después • ${t.titulo}` })} className="print:pointer-events-none">
+                                    <span className="block text-[9px] mb-0.5 text-emerald-700">Después</span>
+                                    <img src={t.foto_despues} alt="Después" className="w-14 h-14 object-cover rounded border cursor-zoom-in print:w-16 print:h-16" />
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1349,6 +1802,85 @@ export default function App() {
         </button>
       )}
 
+      {/* MODAL HISTORIAL / DETALLE */}
+      {modalHistorial && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start gap-3">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">Detalle / Historial de la actividad</h3>
+                <p className="text-[11px] text-slate-500">{modalHistorial.tarea.titulo}</p>
+              </div>
+              <button onClick={() => setModalHistorial(null)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            {cargandoHistorial ? (
+              <p className="text-xs text-slate-500 py-6 text-center">Cargando historial...</p>
+            ) : (
+              <div className="space-y-4 text-xs">
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <p className="font-bold text-slate-700 mb-2">Tiempos por técnico</p>
+                  {modalHistorial.sesiones.filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico').length === 0 ? (
+                    <p className="text-slate-400">Aún no hay sesiones registradas.</p>
+                  ) : modalHistorial.sesiones.filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico').map(s => {
+                    const p = perfiles.find(p => p.id === s.tecnico_id);
+                    const ini = new Date(s.fecha_inicio);
+                    const fin = s.fecha_fin ? new Date(s.fecha_fin) : null;
+                    const seg = Math.max(0, Math.floor(((fin ? fin.getTime() : ahoraReloj) - ini.getTime()) / 1000));
+                    return (
+                      <div key={s.id} className="py-2 border-b border-slate-100 last:border-0">
+                        <div className="flex flex-wrap justify-between gap-2"><strong>{p?.nombre || 'Técnico'}</strong><span>{formatearDuracion(seg)}</span></div>
+                        <div className="text-[10px] text-slate-500">{ini.toLocaleString('es-MX')} → {fin ? fin.toLocaleString('es-MX') : 'En curso'}{s.tipo_fin ? ` • ${s.tipo_fin}` : ''}{s.notas ? ` • ${s.notas}` : ''}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <p className="font-bold text-slate-700 mb-2">Avances / relevos</p>
+                  {modalHistorial.avances.length === 0 ? <p className="text-slate-400">Sin avances registrados.</p> : modalHistorial.avances.map(a => (
+                    <div key={a.id} className="py-2 border-b border-slate-100 last:border-0">
+                      <strong>{perfiles.find(p => p.id === a.tecnico_id)?.nombre || 'Técnico'}</strong> • {a.porcentaje_avance || 0}%
+                      <p className="text-slate-600 mt-0.5">{a.notas_avance || 'Sin nota'}</p>
+                      {a.foto_avance && <button type="button" onClick={() => setFotoAmpliada({src:a.foto_avance,titulo:'Evidencia de avance'})}><img src={a.foto_avance} alt="Avance" className="mt-2 w-24 h-20 object-cover rounded-lg border cursor-zoom-in" /></button>}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <p className="font-bold text-slate-700 mb-2">Bloqueos</p>
+                  {modalHistorial.bloqueos.length === 0 ? <p className="text-slate-400">Sin bloqueos registrados.</p> : modalHistorial.bloqueos.map(b => (
+                    <div key={b.id} className="py-2 border-b border-slate-100 last:border-0"><strong>{b.motivo}</strong><p className="text-slate-600">{b.detalle || 'Sin detalle'}</p></div>
+                  ))}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <p className="font-bold text-slate-700 mb-2">Evidencias</p>
+                  {modalHistorial.fotos.length === 0 ? <p className="text-slate-400">Sin fotografías en el historial.</p> : (
+                    <div className="flex flex-wrap gap-3">{modalHistorial.fotos.map(f => (
+                      <div key={f.id} className="text-center text-[10px] text-slate-500"><span className="block capitalize mb-1">{f.tipo}</span><button type="button" onClick={() => setFotoAmpliada({src:f.url,titulo:`${f.tipo} • ${modalHistorial.tarea.titulo}`})}><img src={f.url} alt={f.tipo} className="w-24 h-20 object-cover rounded-lg border cursor-zoom-in" /></button></div>
+                    ))}</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* VISOR DE FOTOGRAFÍAS */}
+      {fotoAmpliada && (
+        <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4 print:hidden" onClick={() => setFotoAmpliada(null)}>
+          <div className="max-w-5xl w-full max-h-[94vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
+            <div className="w-full flex items-center justify-between text-white">
+              <span className="text-sm font-semibold">{fotoAmpliada.titulo}</span>
+              <button onClick={() => setFotoAmpliada(null)} className="p-2 rounded-full bg-white/10 hover:bg-white/20"><X className="w-5 h-5" /></button>
+            </div>
+            <img src={fotoAmpliada.src} alt={fotoAmpliada.titulo} className="max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl" />
+          </div>
+        </div>
+      )}
+
       {/* MODAL INICIAR / CONTINUAR */}
       {modalInicio && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
@@ -1366,6 +1898,26 @@ export default function App() {
             </div>
 
             <div className="space-y-3 text-xs">
+              {(modalInicio.estado === 'pendiente' || modalInicio.estado === 'bloqueada') && (
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                  <p className="font-bold text-blue-900 mb-2">¿Quiénes iniciarán esta actividad?</p>
+                  <div className="space-y-2">
+                    {tecnicosAsignadosTarea(modalInicio).map(t => (
+                      <label key={t.id} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={tecnicosInicio.includes(t.id)}
+                          onChange={() => alternarTecnicoInicio(t.id)}
+                          className="accent-blue-600"
+                        />
+                        <span className="font-semibold text-slate-700">{t.nombre}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-blue-700 mt-2">Con un solo inicio se abrirá el cronómetro de todos los seleccionados. Después cada técnico puede pausar o continuar únicamente su propio tiempo.</p>
+                </div>
+              )}
+
               <div>
                 <label className="font-semibold text-slate-600 block mb-1">Foto antes / estado al recibir la actividad</label>
                 <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer bg-slate-50 transition min-h-[120px]">
@@ -1393,7 +1945,7 @@ export default function App() {
               </div>
 
               <p className="text-[10px] text-slate-500 bg-blue-50 border border-blue-100 rounded-lg p-2">
-                El tiempo comienza cuando pulses el botón de abajo. Si ya tienes una sesión abierta en esta actividad, no se duplicará.
+                En el primer inicio se abre el tiempo del equipo seleccionado. Si la actividad ya está en proceso, cada técnico únicamente reanuda su propio tiempo. El administrador puede supervisar sin generar tiempo.
               </p>
             </div>
 
@@ -1403,7 +1955,7 @@ export default function App() {
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-3 rounded-lg shadow-md transition flex items-center justify-center gap-2"
             >
               <Play className="w-4 h-4" />
-              {guardandoInicio ? 'Iniciando...' : 'Comenzar actividad y registrar tiempo'}
+              {guardandoInicio ? 'Iniciando...' : ((modalInicio.estado === 'pendiente' || modalInicio.estado === 'bloqueada') ? 'Iniciar equipo y registrar tiempo' : 'Continuar mi tiempo')}
             </button>
           </div>
         </div>
