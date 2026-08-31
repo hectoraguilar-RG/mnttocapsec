@@ -126,8 +126,13 @@ export default function App() {
   const [tareaExpres, setTareaExpres] = useState({
     ubicacion: '',
     descripcion: '',
-    yaResuelto: true
+    yaResuelto: true,
+    foto: null,
+    tipoAtencion: 'hoy',
+    fechaProgramada: hoyStr,
+    asignadoA: ''
   });
+  const [guardandoExpres, setGuardandoExpres] = useState(false);
 
   // Reloj visual para actualizar tiempos activos sin recargar la app
   useEffect(() => {
@@ -876,26 +881,121 @@ export default function App() {
     }
   }
 
-  async function guardarTareaExpres() {
-    if (!tareaExpres.ubicacion || !tareaExpres.descripcion || !usuarioActual) return;
+  async function guardarTareaExpres(notificarAhora = false) {
+    if (!tareaExpres.ubicacion || !tareaExpres.descripcion || !usuarioActual) {
+      alert('Indica la ubicación y qué se encontró o realizó.');
+      return;
+    }
 
-    const { error } = await supabase.from('tareas').insert({
-      titulo: `Atención rápida: ${tareaExpres.descripcion.slice(0, 35)}...`,
+    const tecnicoAsignadoId = usuarioActual.rol === 'tecnico'
+      ? usuarioActual.id
+      : (tareaExpres.asignadoA || null);
+
+    if (!tareaExpres.yaResuelto && usuarioActual.rol === 'admin' && !tecnicoAsignadoId) {
+      alert('Selecciona al técnico responsable para dejar la actividad pendiente.');
+      return;
+    }
+
+    const fechaProgramada = tareaExpres.yaResuelto
+      ? hoyStr
+      : (tareaExpres.tipoAtencion === 'programar' ? (tareaExpres.fechaProgramada || hoyStr) : hoyStr);
+
+    const prioridad = tareaExpres.tipoAtencion === 'urgente'
+      ? 'alta'
+      : tareaExpres.tipoAtencion === 'hoy'
+      ? 'media'
+      : 'baja';
+
+    const ahoraIso = new Date().toISOString();
+    setGuardandoExpres(true);
+
+    const registro = {
+      titulo: tareaExpres.yaResuelto
+        ? `Atención rápida: ${tareaExpres.descripcion.slice(0, 42)}${tareaExpres.descripcion.length > 42 ? '...' : ''}`
+        : `Hallazgo: ${tareaExpres.descripcion.slice(0, 42)}${tareaExpres.descripcion.length > 42 ? '...' : ''}`,
       descripcion: tareaExpres.descripcion,
       ubicacion: tareaExpres.ubicacion,
-      prioridad: 'media',
+      prioridad,
       tipo_origen: 'en_recorrido',
       estado: tareaExpres.yaResuelto ? 'completada' : 'pendiente',
-      tecnico_id: usuarioActual.id,
-      tecnicos_ids: [usuarioActual.id],
-      fecha_programada: hoyStr,
-      fecha_completada: tareaExpres.yaResuelto ? new Date().toISOString() : null
-    });
+      tecnico_id: tecnicoAsignadoId,
+      tecnicos_ids: tecnicoAsignadoId ? [tecnicoAsignadoId] : [],
+      creado_por: usuarioActual.id,
+      fecha_programada: fechaProgramada,
+      fecha_completada: tareaExpres.yaResuelto ? ahoraIso : null,
+      fecha_inicio: tareaExpres.yaResuelto ? ahoraIso : null,
+      fecha_fin: tareaExpres.yaResuelto ? ahoraIso : null,
+      finalizado_por: tareaExpres.yaResuelto ? usuarioActual.id : null,
+      notas_cierre: tareaExpres.yaResuelto ? 'Atención registrada durante recorrido.' : null,
+      foto_antes: !tareaExpres.yaResuelto ? tareaExpres.foto : null,
+      foto_despues: tareaExpres.yaResuelto ? tareaExpres.foto : null
+    };
 
-    if (!error) {
-      setModalExpres(false);
-      setTareaExpres({ ubicacion: '', descripcion: '', yaResuelto: true });
-      cargarTareas();
+    const { data: creada, error } = await supabase
+      .from('tareas')
+      .insert(registro)
+      .select('*')
+      .single();
+
+    if (error) {
+      setGuardandoExpres(false);
+      alert(`No se pudo guardar el reporte: ${error.message}`);
+      return;
+    }
+
+    if (tareaExpres.foto && creada?.id) {
+      const tipoFoto = tareaExpres.yaResuelto ? 'despues' : 'antes';
+      const { error: errorFoto } = await supabase.from('fotos_tarea').insert({
+        tarea_id: creada.id,
+        tecnico_id: usuarioActual.rol === 'tecnico' ? usuarioActual.id : tecnicoAsignadoId,
+        tipo: tipoFoto,
+        url: tareaExpres.foto,
+        comentario: tareaExpres.yaResuelto
+          ? 'Evidencia de atención rápida'
+          : 'Evidencia inicial del hallazgo'
+      });
+      if (errorFoto) console.error('No se pudo guardar la foto en el historial:', errorFoto);
+    }
+
+    const responsable = tecnicoAsignadoId
+      ? (perfiles.find(p => p.id === tecnicoAsignadoId)?.nombre || usuarioActual.nombre)
+      : 'Sin asignar';
+
+    const etiquetaAtencion = tareaExpres.yaResuelto
+      ? 'Resuelta en recorrido'
+      : tareaExpres.tipoAtencion === 'urgente'
+      ? 'URGENTE'
+      : tareaExpres.tipoAtencion === 'hoy'
+      ? 'Atender hoy'
+      : `Programada para ${fechaProgramada}`;
+
+    const mensajeWhatsApp = encodeURIComponent(
+      `🚶 *REPORTE EN RECORRIDO*\n\n` +
+      `📍 *Ubicación:* ${tareaExpres.ubicacion}\n` +
+      `📝 *Detalle:* ${tareaExpres.descripcion}\n` +
+      `⚡ *Atención:* ${etiquetaAtencion}\n` +
+      `👤 *Responsable:* ${responsable}\n` +
+      (tareaExpres.foto ? `📷 *Cuenta con evidencia fotográfica en la app*\n` : '') +
+      `\n📲 *Ver en App:* https://mnttocapsec.vercel.app`
+    );
+
+    setGuardandoExpres(false);
+    setModalExpres(false);
+    setTareaExpres({
+      ubicacion: '',
+      descripcion: '',
+      yaResuelto: true,
+      foto: null,
+      tipoAtencion: 'hoy',
+      fechaProgramada: hoyStr,
+      asignadoA: ''
+    });
+    await cargarTareas();
+
+    if (notificarAhora) {
+      window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
+    } else {
+      alert(tareaExpres.yaResuelto ? 'Atención rápida registrada.' : 'Hallazgo guardado en la app.');
     }
   }
 
@@ -1792,13 +1892,24 @@ export default function App() {
         </nav>
       )}
 
-      {/* BOTÓN FLOTANTE TÉCNICO */}
-      {usuarioActual.rol === 'tecnico' && pestañaActiva === 'operacion' && (
+      {/* BOTÓN FLOTANTE PARA REPORTES EN RECORRIDO / EXPRÉS */}
+      {pestañaActiva === 'operacion' && (
         <button 
-          onClick={() => setModalExpres(true)}
+          onClick={() => {
+            setTareaExpres({
+              ubicacion: '',
+              descripcion: '',
+              yaResuelto: usuarioActual.rol === 'tecnico',
+              foto: null,
+              tipoAtencion: 'hoy',
+              fechaProgramada: hoyStr,
+              asignadoA: usuarioActual.rol === 'tecnico' ? usuarioActual.id : ''
+            });
+            setModalExpres(true);
+          }}
           className="fixed bottom-16 right-4 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2.5 rounded-full shadow-xl flex items-center gap-1.5 font-bold text-xs transition z-30 transform active:scale-95 print:hidden"
         >
-          <PlusCircle className="w-4 h-4" /> + Exprés
+          <PlusCircle className="w-4 h-4" /> {usuarioActual.rol === 'admin' ? '+ Reportar hallazgo' : '+ Exprés / Hallazgo'}
         </button>
       )}
 
@@ -2111,55 +2222,178 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL EXPRÉS */}
+      {/* MODAL EXPRÉS / REPORTE EN RECORRIDO */}
       {modalExpres && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-slate-800 text-sm">Nueva Atención en Recorrido</h3>
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-start gap-3">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {usuarioActual.rol === 'admin' ? 'Reportar hallazgo en recorrido' : 'Nueva atención exprés / hallazgo'}
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  Registra algo que atendiste o una nueva actividad detectada durante el recorrido.
+                </p>
+              </div>
               <button onClick={() => setModalExpres(false)} className="text-slate-400 hover:text-slate-600">
                 <X className="w-5 h-5" />
               </button>
             </div>
+
             <div className="space-y-3 text-xs">
               <div>
                 <label className="font-semibold text-slate-600 block mb-1">¿Dónde fue?</label>
                 <input 
                   type="text" 
-                  placeholder="Ej. Pasillo 3 / Cafetería" 
+                  placeholder="Ej. Pasillo 3 / Cafetería / Salón 204" 
                   value={tareaExpres.ubicacion}
                   onChange={e => setTareaExpres({...tareaExpres, ubicacion: e.target.value})}
                   className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
+
               <div>
-                <label className="font-semibold text-slate-600 block mb-1">¿Qué se realizó?</label>
+                <label className="font-semibold text-slate-600 block mb-1">
+                  {tareaExpres.yaResuelto ? '¿Qué se realizó?' : '¿Qué encontraste / qué se necesita hacer?'}
+                </label>
                 <textarea 
-                  rows={2} 
-                  placeholder="Ej. Ajuste rápido de cerradura" 
+                  rows={3} 
+                  placeholder={tareaExpres.yaResuelto ? 'Ej. Ajuste rápido de cerradura' : 'Ej. Lámpara apagada; revisar conexión y sustituir si es necesario'} 
                   value={tareaExpres.descripcion}
                   onChange={e => setTareaExpres({...tareaExpres, descripcion: e.target.value})}
                   className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
+
               <div>
-                <label className="font-semibold text-slate-600 block mb-1">¿Ya quedó solucionado?</label>
+                <label className="font-semibold text-slate-600 block mb-1">Tipo de registro</label>
                 <select 
                   value={tareaExpres.yaResuelto ? 'si' : 'no'}
                   onChange={e => setTareaExpres({...tareaExpres, yaResuelto: e.target.value === 'si'})}
                   className="w-full p-2.5 border border-slate-300 rounded-lg bg-white"
                 >
-                  <option value="si">✅ Sí, ya quedó lista (Cerrar ahora)</option>
-                  <option value="no">⏳ No, requiere atención posterior</option>
+                  <option value="si">✅ Ya lo atendí / quedó solucionado</option>
+                  <option value="no">🔧 Requiere atención / dejar como tarea</option>
                 </select>
               </div>
+
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">
+                  {tareaExpres.yaResuelto ? 'Foto / evidencia (opcional)' : 'Foto inicial del hallazgo (opcional)'}
+                </label>
+                <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer bg-slate-50 transition min-h-[110px]">
+                  {tareaExpres.foto ? (
+                    <img src={tareaExpres.foto} alt="Evidencia" className="w-full h-28 object-cover rounded-lg" />
+                  ) : (
+                    <>
+                      <Camera className="w-6 h-6 text-slate-400 mb-1" />
+                      <span className="text-[10px] text-slate-500">Tomar o subir fotografía</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={e => procesarFoto(e, foto => setTareaExpres(prev => ({...prev, foto})))}
+                  />
+                </label>
+                {tareaExpres.foto && (
+                  <button
+                    type="button"
+                    onClick={() => setTareaExpres(prev => ({...prev, foto: null}))}
+                    className="mt-1 text-[10px] text-rose-600 hover:text-rose-700"
+                  >
+                    Quitar fotografía
+                  </button>
+                )}
+              </div>
+
+              {!tareaExpres.yaResuelto && (
+                <>
+                  <div>
+                    <label className="font-semibold text-slate-600 block mb-1">¿Cuándo debe atenderse?</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        {valor:'urgente', etiqueta:'🔴 Urgente'},
+                        {valor:'hoy', etiqueta:'🟠 Hoy'},
+                        {valor:'programar', etiqueta:'🔵 Programar'}
+                      ].map(op => (
+                        <button
+                          type="button"
+                          key={op.valor}
+                          onClick={() => setTareaExpres({...tareaExpres, tipoAtencion: op.valor})}
+                          className={`p-2 rounded-lg border text-[10px] font-bold transition ${
+                            tareaExpres.tipoAtencion === op.valor
+                              ? 'bg-blue-600 border-blue-600 text-white'
+                              : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          {op.etiqueta}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {tareaExpres.tipoAtencion === 'programar' && (
+                    <div>
+                      <label className="font-semibold text-slate-600 block mb-1">Fecha para atender</label>
+                      <input
+                        type="date"
+                        min={hoyStr}
+                        value={tareaExpres.fechaProgramada}
+                        onChange={e => setTareaExpres({...tareaExpres, fechaProgramada: e.target.value})}
+                        className="w-full p-2.5 border border-slate-300 rounded-lg bg-white"
+                      />
+                    </div>
+                  )}
+
+                  {usuarioActual.rol === 'admin' ? (
+                    <div>
+                      <label className="font-semibold text-slate-600 block mb-1">Responsable</label>
+                      <select
+                        value={tareaExpres.asignadoA}
+                        onChange={e => setTareaExpres({...tareaExpres, asignadoA: e.target.value})}
+                        className="w-full p-2.5 border border-slate-300 rounded-lg bg-white"
+                      >
+                        <option value="">Selecciona un técnico</option>
+                        {tecnicosLista.map(t => <option key={t.id} value={t.id}>{t.nombre}</option>)}
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-2.5 text-blue-800">
+                      <strong>Responsable:</strong> {usuarioActual.nombre}. Si requiere atención posterior, la actividad quedará en tus pendientes.
+                    </div>
+                  )}
+                </>
+              )}
+
+              {tareaExpres.yaResuelto && (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5 text-emerald-800">
+                  Se guardará como actividad completada en recorrido. La fotografía, si agregas una, quedará como evidencia final.
+                </div>
+              )}
             </div>
-            <button 
-              onClick={guardarTareaExpres}
-              className="w-full bg-blue-600 text-white font-bold text-xs py-3 rounded-lg shadow-md hover:bg-blue-700 transition"
-            >
-              Guardar Registro
-            </button>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button 
+                onClick={() => guardarTareaExpres(false)}
+                disabled={guardandoExpres}
+                className="bg-slate-700 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs py-3 rounded-lg shadow-md transition"
+              >
+                {guardandoExpres ? 'Guardando...' : 'Guardar en la app'}
+              </button>
+
+              {!tareaExpres.yaResuelto && (
+                <button 
+                  onClick={() => guardarTareaExpres(true)}
+                  disabled={guardandoExpres}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs py-3 rounded-lg shadow-md transition flex items-center justify-center gap-1.5"
+                >
+                  <Send className="w-4 h-4" /> Guardar y avisar
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
