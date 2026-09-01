@@ -27,7 +27,11 @@ import {
   Pause,
   Download,
   Maximize2,
-  Eye
+  Eye,
+  RefreshCw,
+  UserPlus,
+  ArrowRightLeft,
+  Link2
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -130,9 +134,16 @@ export default function App() {
     foto: null,
     tipoAtencion: 'hoy',
     fechaProgramada: hoyStr,
-    asignadoA: ''
+    asignadoA: '',
+    tecnicos_seleccionados: []
   });
   const [guardandoExpres, setGuardandoExpres] = useState(false);
+  const [ultimoActualizado, setUltimoActualizado] = useState(null);
+  const [actualizando, setActualizando] = useState(false);
+  const [modalResponsables, setModalResponsables] = useState(null);
+  const [responsablesSeleccionados, setResponsablesSeleccionados] = useState([]);
+  const [notaCambioResponsables, setNotaCambioResponsables] = useState('');
+  const [guardandoResponsables, setGuardandoResponsables] = useState(false);
 
   // Reloj visual para actualizar tiempos activos sin recargar la app
   useEffect(() => {
@@ -195,6 +206,42 @@ export default function App() {
     }
   }, [usuarioActual]);
 
+
+  // Actualización automática y al volver a la PWA.
+  // Se usa un intervalo moderado para no gastar consultas innecesarias.
+  useEffect(() => {
+    if (!usuarioActual) return;
+
+    const refrescarSilencioso = () => cargarTareas(true);
+    const intervalo = setInterval(refrescarSilencioso, 60000);
+    const alVolver = () => {
+      if (document.visibilityState === 'visible') refrescarSilencioso();
+    };
+    const alEnfocar = () => refrescarSilencioso();
+
+    document.addEventListener('visibilitychange', alVolver);
+    window.addEventListener('focus', alEnfocar);
+
+    return () => {
+      clearInterval(intervalo);
+      document.removeEventListener('visibilitychange', alVolver);
+      window.removeEventListener('focus', alEnfocar);
+    };
+  }, [usuarioActual]);
+
+  // Si se llega desde WhatsApp con ?tarea=UUID, abrir el detalle de esa actividad.
+  useEffect(() => {
+    if (!usuarioActual || tareas.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const tareaId = params.get('tarea');
+    if (!tareaId) return;
+    const encontrada = tareas.find(t => t.id === tareaId);
+    if (encontrada) {
+      abrirHistorial(encontrada);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [usuarioActual, tareas]);
+
   async function cargarPerfilesYUsuario() {
     setCargando(true);
     const { data: perfilesData } = await supabase.from('perfiles').select('*').order('nombre');
@@ -226,9 +273,10 @@ export default function App() {
     setTareas([]);
   }
 
-  async function cargarTareas() {
+  async function cargarTareas(silencioso = false) {
     if (!usuarioActual) return;
-    setCargando(true);
+    if (silencioso) setActualizando(true);
+    else setCargando(true);
 
     const [{ data, error }, { data: sesionesData, error: errorSesiones }] = await Promise.all([
       supabase.from('tareas').select('*').order('created_at', { ascending: false }),
@@ -260,15 +308,16 @@ export default function App() {
           const esFechaValida = t.fecha_programada <= hoy;
           const estaEnGrupo = t.tecnicos_ids && t.tecnicos_ids.includes(usuarioActual.id);
           const esIndividual = t.tecnico_id === usuarioActual.id;
-          const esRelevoAbierto = t.estado === 'en_proceso' || t.estado === 'pendiente';
-
-          return esFechaValida && (estaEnGrupo || esIndividual || esRelevoAbierto);
+          // Un técnico solo ve órdenes en las que está explícitamente asignado.
+          return esFechaValida && (estaEnGrupo || esIndividual);
         });
 
         setTareas(filtradas);
       }
     }
-    setCargando(false);
+    setUltimoActualizado(new Date());
+    if (silencioso) setActualizando(false);
+    else setCargando(false);
   }
 
   function procesarFoto(e, callback) {
@@ -323,6 +372,90 @@ export default function App() {
     return perfiles.filter(p => p.rol === 'tecnico' && ids.includes(p.id));
   }
 
+
+  function estaAsignadoATarea(tarea, usuarioId = usuarioActual?.id) {
+    if (!tarea || !usuarioId) return false;
+    return tarea.tecnico_id === usuarioId || (tarea.tecnicos_ids || []).includes(usuarioId);
+  }
+
+  function puedeModificarTarea(tarea) {
+    if (usuarioActual?.rol === 'admin') return true;
+    return usuarioActual?.rol === 'tecnico' && estaAsignadoATarea(tarea);
+  }
+
+  function validarPermisoTarea(tarea, accion = 'modificar esta actividad') {
+    if (puedeModificarTarea(tarea)) return true;
+    alert(`No tienes autorización para ${accion}. La actividad no está asignada a tu perfil.`);
+    return false;
+  }
+
+  function enlaceTarea(tareaId) {
+    return `${window.location.origin}/?tarea=${encodeURIComponent(tareaId)}`;
+  }
+
+  function abrirCambioResponsables(tarea, modo) {
+    if (!validarPermisoTarea(tarea, modo === 'transferir' ? 'transferir esta actividad' : 'agregar apoyo')) return;
+    const actuales = tecnicosAsignadosTarea(tarea).map(t => t.id);
+    setModalResponsables({ tarea, modo });
+    setResponsablesSeleccionados(modo === 'transferir' ? [] : actuales);
+    setNotaCambioResponsables('');
+  }
+
+  function alternarResponsable(id) {
+    setResponsablesSeleccionados(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  }
+
+  async function guardarCambioResponsables() {
+    if (!modalResponsables || !usuarioActual) return;
+    const { tarea, modo } = modalResponsables;
+    if (!validarPermisoTarea(tarea, modo === 'transferir' ? 'transferir esta actividad' : 'agregar apoyo')) return;
+    const ids = responsablesSeleccionados.filter(id => perfiles.find(p => p.id === id)?.rol === 'tecnico');
+    if (ids.length === 0) {
+      alert('Selecciona al menos a un técnico.');
+      return;
+    }
+    setGuardandoResponsables(true);
+    const ahora = new Date().toISOString();
+
+    if (modo === 'transferir') {
+      // Cierra los cronómetros actuales; el nuevo responsable inicia cuando realmente comience.
+      await supabase.from('sesiones_tarea')
+        .update({ fecha_fin: ahora, tipo_fin: 'relevo', notas: notaCambioResponsables || 'Actividad transferida' })
+        .eq('tarea_id', tarea.id)
+        .is('fecha_fin', null);
+    }
+
+    const actuales = tecnicosAsignadosTarea(tarea).map(t => t.id);
+    const nuevos = modo === 'transferir' ? ids : Array.from(new Set([...actuales, ...ids]));
+    const { error } = await supabase.from('tareas').update({
+      tecnico_id: nuevos[0],
+      tecnicos_ids: nuevos,
+      estado: modo === 'transferir' ? ((tarea._sesiones || []).length > 0 ? 'en_proceso' : 'pendiente') : tarea.estado
+    }).eq('id', tarea.id);
+
+    if (!error) {
+      const nombres = perfiles.filter(p => ids.includes(p.id)).map(p => p.nombre.split(' ')[0]).join(', ');
+      await supabase.from('avances_tarea').insert({
+        tarea_id: tarea.id,
+        tecnico_id: usuarioActual.rol === 'tecnico' ? usuarioActual.id : (tarea.tecnico_id || ids[0]),
+        porcentaje_avance: 0,
+        notas_avance: `${modo === 'transferir' ? 'Transferencia/Reasignación a' : 'Apoyo agregado'}: ${nombres}${notaCambioResponsables ? `. ${notaCambioResponsables}` : ''}`,
+        foto_avance: null
+      });
+    }
+
+    setGuardandoResponsables(false);
+    if (error) {
+      alert(`No se pudo actualizar responsables: ${error.message}`);
+      return;
+    }
+    setModalResponsables(null);
+    setResponsablesSeleccionados([]);
+    setNotaCambioResponsables('');
+    await cargarTareas();
+    alert(modo === 'transferir' ? 'Actividad transferida. El nuevo responsable deberá pulsar Continuar cuando empiece.' : 'Apoyo agregado correctamente.');
+  }
+
   function tiemposPorTecnico(tarea) {
     const idsTecnicos = new Set(perfiles.filter(p => p.rol === 'tecnico').map(p => p.id));
     const acumulado = {};
@@ -354,6 +487,7 @@ export default function App() {
   }
 
   function abrirInicio(tarea) {
+    if (!validarPermisoTarea(tarea, 'iniciar o continuar esta actividad')) return;
     setModalInicio(tarea);
     setNotasInicio('');
     setFotoInicio(tarea.estado === 'pendiente' || tarea.estado === 'bloqueada' ? (tarea.foto_antes || null) : null);
@@ -391,6 +525,7 @@ export default function App() {
 
   async function pausarTiempo(tarea) {
     if (!usuarioActual) return;
+    if (!validarPermisoTarea(tarea, 'pausar tiempo en esta actividad')) return;
     const activa = sesionActivaDeUsuario(tarea);
     if (!activa) {
       alert('No tienes un cronómetro activo en esta actividad.');
@@ -629,6 +764,7 @@ export default function App() {
 
   async function guardarCierreTarea() {
     if (!modalTerminar || !usuarioActual) return;
+    if (!validarPermisoTarea(modalTerminar, 'terminar esta actividad')) return;
     setGuardandoCierre(true);
 
     const ahora = new Date().toISOString();
@@ -673,6 +809,7 @@ export default function App() {
 
   async function guardarAvanceTurno() {
     if (!modalAvance || !notaAvance || !usuarioActual) return;
+    if (!validarPermisoTarea(modalAvance, 'registrar un avance en esta actividad')) return;
     setGuardandoAvance(true);
 
     await supabase.from('avances_tarea').insert({
@@ -783,7 +920,8 @@ export default function App() {
         `${hora}\n` +
         `📍 ${t.ubicacion}\n` +
         `👥 ${nombres}` +
-        (t.descripcion ? `\n📝 ${t.descripcion}` : '')
+        (t.descripcion ? `\n📝 ${t.descripcion}` : '') +
+        `\n📲 ${enlaceTarea(t.id)}`
       );
     });
 
@@ -832,7 +970,7 @@ export default function App() {
       });
     }
 
-    const { error } = await supabase.from('tareas').insert(registrosParaInsertar);
+    const { data: tareasCreadas, error } = await supabase.from('tareas').insert(registrosParaInsertar).select('*');
 
     if (!error) {
       const nombresTecnicos = perfiles
@@ -848,7 +986,7 @@ export default function App() {
         `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
         (nuevaTarea.hora_programada ? `🕐 *Hora aproximada:* ${nuevaTarea.hora_programada}\n` : '') +
         (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n\n` : '\n') +
-        `📲 *Ver en App:* https://mnttocapsec.vercel.app`
+        `📲 *Ver actividad:* ${tareasCreadas?.length === 1 ? enlaceTarea(tareasCreadas[0].id) : window.location.origin}`
       );
 
       setNuevaTarea({ 
@@ -887,14 +1025,25 @@ export default function App() {
       return;
     }
 
-    const tecnicoAsignadoId = usuarioActual.rol === 'tecnico'
-      ? usuarioActual.id
-      : (tareaExpres.asignadoA || null);
+    let tecnicosAsignadosIds = Array.from(new Set(tareaExpres.tecnicos_seleccionados || []))
+      .filter(id => perfiles.find(p => p.id === id)?.rol === 'tecnico');
 
-    if (!tareaExpres.yaResuelto && usuarioActual.rol === 'admin' && !tecnicoAsignadoId) {
-      alert('Selecciona al técnico responsable para dejar la actividad pendiente.');
+    // Si lo crea un técnico, él queda incluido por defecto, pero puede agregar compañeros.
+    if (usuarioActual.rol === 'tecnico' && !tecnicosAsignadosIds.includes(usuarioActual.id)) {
+      tecnicosAsignadosIds.unshift(usuarioActual.id);
+    }
+
+    // Una atención ya resuelta por un técnico queda atribuida a quien la registró.
+    if (tareaExpres.yaResuelto && usuarioActual.rol === 'tecnico' && tecnicosAsignadosIds.length === 0) {
+      tecnicosAsignadosIds = [usuarioActual.id];
+    }
+
+    if (!tareaExpres.yaResuelto && tecnicosAsignadosIds.length === 0) {
+      alert('Selecciona al menos a un técnico responsable.');
       return;
     }
+
+    const tecnicoAsignadoId = tecnicosAsignadosIds[0] || (usuarioActual.rol === 'tecnico' ? usuarioActual.id : null);
 
     const fechaProgramada = tareaExpres.yaResuelto
       ? hoyStr
@@ -919,7 +1068,7 @@ export default function App() {
       tipo_origen: 'en_recorrido',
       estado: tareaExpres.yaResuelto ? 'completada' : 'pendiente',
       tecnico_id: tecnicoAsignadoId,
-      tecnicos_ids: tecnicoAsignadoId ? [tecnicoAsignadoId] : [],
+      tecnicos_ids: tecnicosAsignadosIds,
       creado_por: usuarioActual.id,
       fecha_programada: fechaProgramada,
       fecha_completada: tareaExpres.yaResuelto ? ahoraIso : null,
@@ -957,8 +1106,8 @@ export default function App() {
       if (errorFoto) console.error('No se pudo guardar la foto en el historial:', errorFoto);
     }
 
-    const responsable = tecnicoAsignadoId
-      ? (perfiles.find(p => p.id === tecnicoAsignadoId)?.nombre || usuarioActual.nombre)
+    const responsable = tecnicosAsignadosIds.length
+      ? perfiles.filter(p => tecnicosAsignadosIds.includes(p.id)).map(p => p.nombre.split(' ')[0]).join(' + ')
       : 'Sin asignar';
 
     const etiquetaAtencion = tareaExpres.yaResuelto
@@ -976,7 +1125,7 @@ export default function App() {
       `⚡ *Atención:* ${etiquetaAtencion}\n` +
       `👤 *Responsable:* ${responsable}\n` +
       (tareaExpres.foto ? `📷 *Cuenta con evidencia fotográfica en la app*\n` : '') +
-      `\n📲 *Ver en App:* https://mnttocapsec.vercel.app`
+      `\n📲 *Ver actividad:* ${creada?.id ? enlaceTarea(creada.id) : window.location.origin}`
     );
 
     setGuardandoExpres(false);
@@ -988,7 +1137,8 @@ export default function App() {
       foto: null,
       tipoAtencion: 'hoy',
       fechaProgramada: hoyStr,
-      asignadoA: ''
+      asignadoA: '',
+      tecnicos_seleccionados: []
     });
     await cargarTareas();
 
@@ -1233,6 +1383,15 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <button
+              onClick={() => cargarTareas(true)}
+              disabled={actualizando}
+              className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border border-slate-700"
+              title={ultimoActualizado ? `Última actualización: ${ultimoActualizado.toLocaleTimeString('es-MX', {hour:'2-digit', minute:'2-digit'})}` : 'Actualizar'}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${actualizando ? 'animate-spin' : ''}`} /> Actualizar
+            </button>
 
             {!esStandalone && installPrompt && (
               <button
@@ -1544,7 +1703,7 @@ export default function App() {
                               </button>
                             )}
 
-                            {t.estado === 'en_proceso' && (
+                            {t.estado === 'en_proceso' && puedeModificarTarea(t) && (
                               <>
                                 {usuarioActual.rol === 'tecnico' && (
                                   !sesionActivaDeUsuario(t) ? (
@@ -1599,6 +1758,23 @@ export default function App() {
                               </>
                             )}
 
+                            {puedeModificarTarea(t) && (
+                              <>
+                                <button
+                                  onClick={() => abrirCambioResponsables(t, 'apoyo')}
+                                  className="bg-cyan-100 hover:bg-cyan-200 text-cyan-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <UserPlus className="w-4 h-4" /> Agregar apoyo
+                                </button>
+                                <button
+                                  onClick={() => abrirCambioResponsables(t, 'transferir')}
+                                  className="bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                                >
+                                  <ArrowRightLeft className="w-4 h-4" /> Transferir
+                                </button>
+                              </>
+                            )}
+
                             {usuarioActual.rol === 'admin' && (
                               <>
                                 <button
@@ -1635,13 +1811,25 @@ export default function App() {
                         )}
 
 
-                        {usuarioActual.rol === 'admin' && (
+                        {(usuarioActual.rol === 'admin' || estaAsignadoATarea(t)) && (
+                          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 print:hidden">
                           <button
                             onClick={() => abrirHistorial(t)}
                             className="mt-2 w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition print:hidden"
                           >
                             <Eye className="w-4 h-4" /> Ver detalle / historial
                           </button>
+                          <button
+                            onClick={async () => {
+                              const url = enlaceTarea(t.id);
+                              try { await navigator.clipboard.writeText(url); alert('Enlace de la actividad copiado.'); }
+                              catch { window.prompt('Copia este enlace:', url); }
+                            }}
+                            className="bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                          >
+                            <Link2 className="w-4 h-4" /> Copiar enlace
+                          </button>
+                          </div>
                         )}
                       </div>
                     );
@@ -1903,7 +2091,8 @@ export default function App() {
               foto: null,
               tipoAtencion: 'hoy',
               fechaProgramada: hoyStr,
-              asignadoA: usuarioActual.rol === 'tecnico' ? usuarioActual.id : ''
+              asignadoA: usuarioActual.rol === 'tecnico' ? usuarioActual.id : '',
+              tecnicos_seleccionados: usuarioActual.rol === 'tecnico' ? [usuarioActual.id] : []
             });
             setModalExpres(true);
           }}
@@ -2348,30 +2537,71 @@ export default function App() {
                     </div>
                   )}
 
-                  {usuarioActual.rol === 'admin' ? (
-                    <div>
-                      <label className="font-semibold text-slate-600 block mb-1">Responsable</label>
-                      <select
-                        value={tareaExpres.asignadoA}
-                        onChange={e => setTareaExpres({...tareaExpres, asignadoA: e.target.value})}
-                        className="w-full p-2.5 border border-slate-300 rounded-lg bg-white"
-                      >
-                        <option value="">Selecciona un técnico</option>
-                        {tecnicosLista.map(t => <option key={t.id} value={t.id}>{t.nombre}</option>)}
-                      </select>
+                  <div>
+                    <label className="font-semibold text-slate-600 block mb-1">Responsable(s) / apoyo</label>
+                    <div className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                      {tecnicosLista.map(t => {
+                        const seleccionado = (tareaExpres.tecnicos_seleccionados || []).includes(t.id);
+                        const esCreadorTecnico = usuarioActual.rol === 'tecnico' && t.id === usuarioActual.id;
+                        return (
+                          <button
+                            type="button"
+                            key={t.id}
+                            onClick={() => {
+                              if (esCreadorTecnico) return;
+                              setTareaExpres(prev => ({
+                                ...prev,
+                                tecnicos_seleccionados: seleccionado
+                                  ? prev.tecnicos_seleccionados.filter(id => id !== t.id)
+                                  : [...prev.tecnicos_seleccionados, t.id]
+                              }));
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${seleccionado ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300'} ${esCreadorTecnico ? 'cursor-default' : ''}`}
+                          >
+                            {seleccionado ? '✓ ' : ''}{t.nombre.split(' ')[0]}{esCreadorTecnico ? ' (tú)' : ''}
+                          </button>
+                        );
+                      })}
                     </div>
-                  ) : (
-                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-2.5 text-blue-800">
-                      <strong>Responsable:</strong> {usuarioActual.nombre}. Si requiere atención posterior, la actividad quedará en tus pendientes.
-                    </div>
-                  )}
+                    <p className="text-[10px] text-slate-500 mt-1">Puedes seleccionar a varios. Si eres técnico, tú quedas incluido automáticamente y puedes agregar apoyo.</p>
+                  </div>
                 </>
               )}
 
               {tareaExpres.yaResuelto && (
-                <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5 text-emerald-800">
-                  Se guardará como actividad completada en recorrido. La fotografía, si agregas una, quedará como evidencia final.
-                </div>
+                <>
+                  <div>
+                    <label className="font-semibold text-slate-600 block mb-1">¿Quién(es) participaron?</label>
+                    <div className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                      {tecnicosLista.map(t => {
+                        const seleccionado = (tareaExpres.tecnicos_seleccionados || []).includes(t.id);
+                        const esCreadorTecnico = usuarioActual.rol === 'tecnico' && t.id === usuarioActual.id;
+                        return (
+                          <button
+                            type="button"
+                            key={t.id}
+                            onClick={() => {
+                              if (esCreadorTecnico) return;
+                              setTareaExpres(prev => ({
+                                ...prev,
+                                tecnicos_seleccionados: seleccionado
+                                  ? prev.tecnicos_seleccionados.filter(id => id !== t.id)
+                                  : [...prev.tecnicos_seleccionados, t.id]
+                              }));
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${seleccionado ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-700 border-slate-300'} ${esCreadorTecnico ? 'cursor-default' : ''}`}
+                          >
+                            {seleccionado ? '✓ ' : ''}{t.nombre.split(' ')[0]}{esCreadorTecnico ? ' (tú)' : ''}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">Sirve para dejar registro si la atención exprés fue realizada por más de una persona.</p>
+                  </div>
+                  <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5 text-emerald-800">
+                    Se guardará como actividad completada en recorrido. La fotografía, si agregas una, quedará como evidencia final.
+                  </div>
+                </>
               )}
             </div>
 
@@ -2394,6 +2624,56 @@ export default function App() {
                 </button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL AGREGAR APOYO / TRANSFERIR */}
+      {modalResponsables && (
+        <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start gap-3">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {modalResponsables.modo === 'transferir' ? 'Transferir / Reasignar actividad' : 'Agregar apoyo a la actividad'}
+                </h3>
+                <p className="text-[11px] text-slate-500">{modalResponsables.tarea.titulo}</p>
+              </div>
+              <button onClick={() => setModalResponsables(null)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <div className="text-xs space-y-3">
+              {modalResponsables.modo === 'transferir' && (
+                <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-2.5 text-indigo-800">
+                  Al transferir se cerrarán los cronómetros abiertos. El nuevo responsable comenzará su tiempo cuando pulse <strong>Continuar mi tiempo</strong>.
+                </div>
+              )}
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Selecciona técnico(s)</label>
+                <div className="flex flex-wrap gap-2">
+                  {tecnicosLista.map(t => {
+                    const seleccionado = responsablesSeleccionados.includes(t.id);
+                    return (
+                      <button key={t.id} type="button" onClick={() => alternarResponsable(t.id)}
+                        className={`px-3 py-2 rounded-lg border text-xs font-semibold transition ${seleccionado ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-300'}`}>
+                        {seleccionado ? '✓ ' : ''}{t.nombre.split(' ')[0]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Nota / motivo (opcional)</label>
+                <textarea rows={3} value={notaCambioResponsables} onChange={e => setNotaCambioResponsables(e.target.value)}
+                  placeholder={modalResponsables.modo === 'transferir' ? 'Ej. Debo atender una urgencia; queda desmontada la pieza.' : 'Ej. Se requiere apoyo para mover mobiliario.'}
+                  className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+            </div>
+
+            <button onClick={guardarCambioResponsables} disabled={guardandoResponsables}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs py-3 rounded-lg shadow-md transition">
+              {guardandoResponsables ? 'Guardando...' : (modalResponsables.modo === 'transferir' ? 'Confirmar transferencia' : 'Agregar apoyo')}
+            </button>
           </div>
         </div>
       )}
