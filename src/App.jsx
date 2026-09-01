@@ -124,7 +124,8 @@ export default function App() {
     hora_programada: '',
     fecha_fin: hoyStr,
     es_recurrente: false,
-    tecnicos_seleccionados: []
+    tecnicos_seleccionados: [],
+    foto: null
   });
 
   const [tareaExpres, setTareaExpres] = useState({
@@ -966,13 +967,28 @@ export default function App() {
         tipo_origen: 'programada',
         estado: 'pendiente',
         fecha_programada: d.toISOString().split('T')[0],
-        hora_programada: nuevaTarea.hora_programada || null
+        hora_programada: nuevaTarea.hora_programada || null,
+        foto_antes: nuevaTarea.foto || null
       });
     }
 
     const { data: tareasCreadas, error } = await supabase.from('tareas').insert(registrosParaInsertar).select('*');
 
     if (!error) {
+      // Si el administrador adjuntó una imagen al programar, conservarla también
+      // en el historial de evidencias de cada orden creada.
+      if (nuevaTarea.foto && tareasCreadas?.length) {
+        const evidencias = tareasCreadas.map(tareaCreada => ({
+          tarea_id: tareaCreada.id,
+          tecnico_id: usuarioActual?.id || null,
+          tipo: 'antes',
+          url: nuevaTarea.foto,
+          comentario: 'Evidencia / referencia adjunta al programar la actividad'
+        }));
+        const { error: errorFotosProgramadas } = await supabase.from('fotos_tarea').insert(evidencias);
+        if (errorFotosProgramadas) console.error('No se pudo guardar la evidencia programada en el historial:', errorFotosProgramadas);
+      }
+
       const nombresTecnicos = perfiles
         .filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id))
         .map(p => p.nombre.split(' ')[0])
@@ -985,8 +1001,9 @@ export default function App() {
         `👥 *Responsable(s):* ${nombresTecnicos}\n` +
         `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
         (nuevaTarea.hora_programada ? `🕐 *Hora aproximada:* ${nuevaTarea.hora_programada}\n` : '') +
-        (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n\n` : '\n') +
-        `📲 *Ver actividad:* ${tareasCreadas?.length === 1 ? enlaceTarea(tareasCreadas[0].id) : window.location.origin}`
+        (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n` : '') +
+        (nuevaTarea.foto ? `📷 *Cuenta con imagen de referencia en la app*\n` : '') +
+        `\n📲 *Ver actividad:* ${tareasCreadas?.length === 1 ? enlaceTarea(tareasCreadas[0].id) : window.location.origin}`
       );
 
       setNuevaTarea({ 
@@ -998,7 +1015,8 @@ export default function App() {
         hora_programada: '',
         fecha_fin: hoyStr,
         es_recurrente: false,
-        tecnicos_seleccionados: [] 
+        tecnicos_seleccionados: [],
+        foto: null
       });
       cargarTareas();
 
@@ -1168,8 +1186,20 @@ export default function App() {
       if (!corresponde) return false;
     }
 
-    if (filtroEstado === 'pendientes') return t.estado === 'pendiente';
+    const esFutura = Boolean(t.fecha_programada && t.fecha_programada > hoyStr);
+    const tieneTecnicoTrabajando = (t._sesiones || []).some(s => {
+      const perfil = perfiles.find(p => p.id === s.tecnico_id);
+      return perfil?.rol === 'tecnico' && !s.fecha_fin;
+    });
+
+    // Pendientes = ya corresponde atenderlas. Las futuras se consultan en Próximas.
+    if (filtroEstado === 'pendientes') return t.estado === 'pendiente' && !esFutura;
+    // En curso = alguien está contabilizando tiempo en este momento.
+    if (filtroEstado === 'en_curso') return tieneTecnicoTrabajando;
+    // En proceso / relevos = la orden ya fue iniciada aunque en este instante esté pausada.
     if (filtroEstado === 'en_proceso') return t.estado === 'en_proceso';
+    // Próximas = órdenes aún no concluidas cuya fecha todavía no llega.
+    if (filtroEstado === 'proximas') return esFutura && !['completada', 'cancelada'].includes(t.estado);
     if (filtroEstado === 'bloqueadas') return t.estado === 'bloqueada';
     if (filtroEstado === 'completadas') return t.estado === 'completada';
     if (filtroEstado === 'canceladas') return t.estado === 'cancelada';
@@ -1549,6 +1579,57 @@ export default function App() {
                       onChange={e => setNuevaTarea({...nuevaTarea, descripcion: e.target.value})}
                       className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="font-semibold text-slate-600 block mb-1">Foto / imagen de referencia (opcional)</label>
+                    <p className="text-[10px] text-slate-400 mb-2">Puedes tomar una foto en el momento o subir una imagen que hayas recibido por correo, WhatsApp u otro medio.</p>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-3">
+                      {nuevaTarea.foto && (
+                        <div className="flex items-start gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setFotoAmpliada({ src: nuevaTarea.foto, titulo: 'Imagen de referencia de la actividad' })}
+                            className="relative shrink-0"
+                          >
+                            <img src={nuevaTarea.foto} alt="Referencia" className="w-28 h-24 object-cover rounded-lg border cursor-zoom-in" />
+                            <Maximize2 className="absolute bottom-1 right-1 w-4 h-4 p-0.5 rounded bg-black/60 text-white" />
+                          </button>
+                          <div className="flex-1">
+                            <p className="text-[10px] text-slate-500">Esta imagen quedará asociada como evidencia inicial / referencia.</p>
+                            <button
+                              type="button"
+                              onClick={() => setNuevaTarea(prev => ({...prev, foto: null}))}
+                              className="mt-2 text-[10px] font-semibold text-rose-600 hover:text-rose-700"
+                            >
+                              Quitar imagen
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="cursor-pointer border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg p-2.5 flex items-center justify-center gap-1.5 font-semibold">
+                          <Camera className="w-4 h-4" /> Tomar foto
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={e => procesarFoto(e, foto => setNuevaTarea(prev => ({...prev, foto})))}
+                          />
+                        </label>
+                        <label className="cursor-pointer border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 rounded-lg p-2.5 flex items-center justify-center gap-1.5 font-semibold">
+                          <FileText className="w-4 h-4" /> Subir imagen
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={e => procesarFoto(e, foto => setNuevaTarea(prev => ({...prev, foto})))}
+                          />
+                        </label>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -2046,12 +2127,28 @@ export default function App() {
             ⏳ Pendientes
           </button>
           <button 
+            onClick={() => setFiltroEstado('en_curso')}
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
+              filtroEstado === 'en_curso' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🟢 En curso
+          </button>
+          <button 
             onClick={() => setFiltroEstado('en_proceso')}
             className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
               filtroEstado === 'en_proceso' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
             }`}
           >
-            🔄 Relevos
+            🔄 En proceso / Relevos
+          </button>
+          <button 
+            onClick={() => setFiltroEstado('proximas')}
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
+              filtroEstado === 'proximas' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            📅 Próximas
           </button>
           <button 
             onClick={() => setFiltroEstado('bloqueadas')}
@@ -2470,32 +2567,54 @@ export default function App() {
                 <label className="font-semibold text-slate-600 block mb-1">
                   {tareaExpres.yaResuelto ? 'Foto / evidencia (opcional)' : 'Foto inicial del hallazgo (opcional)'}
                 </label>
-                <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer bg-slate-50 transition min-h-[110px]">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-3">
                   {tareaExpres.foto ? (
-                    <img src={tareaExpres.foto} alt="Evidencia" className="w-full h-28 object-cover rounded-lg" />
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setFotoAmpliada({ src: tareaExpres.foto, titulo: tareaExpres.yaResuelto ? 'Evidencia de atención exprés' : 'Evidencia inicial del hallazgo' })}
+                        className="relative w-full"
+                      >
+                        <img src={tareaExpres.foto} alt="Evidencia" className="w-full h-32 object-cover rounded-lg cursor-zoom-in" />
+                        <Maximize2 className="absolute bottom-2 right-2 w-5 h-5 p-0.5 rounded bg-black/60 text-white" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTareaExpres(prev => ({...prev, foto: null}))}
+                        className="text-[10px] font-semibold text-rose-600 hover:text-rose-700"
+                      >
+                        Quitar fotografía
+                      </button>
+                    </div>
                   ) : (
-                    <>
-                      <Camera className="w-6 h-6 text-slate-400 mb-1" />
-                      <span className="text-[10px] text-slate-500">Tomar o subir fotografía</span>
-                    </>
+                    <div className="text-center py-2">
+                      <Camera className="w-6 h-6 text-slate-400 mx-auto mb-1" />
+                      <span className="text-[10px] text-slate-500">Sin fotografía seleccionada</span>
+                    </div>
                   )}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    className="hidden"
-                    onChange={e => procesarFoto(e, foto => setTareaExpres(prev => ({...prev, foto})))}
-                  />
-                </label>
-                {tareaExpres.foto && (
-                  <button
-                    type="button"
-                    onClick={() => setTareaExpres(prev => ({...prev, foto: null}))}
-                    className="mt-1 text-[10px] text-rose-600 hover:text-rose-700"
-                  >
-                    Quitar fotografía
-                  </button>
-                )}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="cursor-pointer border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg p-2.5 flex items-center justify-center gap-1.5 font-semibold">
+                      <Camera className="w-4 h-4" /> Tomar foto
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden"
+                        onChange={e => procesarFoto(e, foto => setTareaExpres(prev => ({...prev, foto})))}
+                      />
+                    </label>
+                    <label className="cursor-pointer border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 rounded-lg p-2.5 flex items-center justify-center gap-1.5 font-semibold">
+                      <FileText className="w-4 h-4" /> Subir imagen
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={e => procesarFoto(e, foto => setTareaExpres(prev => ({...prev, foto})))}
+                      />
+                    </label>
+                  </div>
+                </div>
               </div>
 
               {!tareaExpres.yaResuelto && (
