@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { 
   Wrench, 
@@ -31,7 +31,9 @@ import {
   RefreshCw,
   UserPlus,
   ArrowRightLeft,
-  Link2
+  Link2,
+  Pencil,
+  Printer
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -85,6 +87,8 @@ export default function App() {
   const [filtroTecnicoAdmin, setFiltroTecnicoAdmin] = useState('todos');
   const [tipoPeriodoReporte, setTipoPeriodoReporte] = useState('semanal');
   const [fechaReferenciaReporte, setFechaReferenciaReporte] = useState(new Date().toISOString().split('T')[0]);
+  const [guardandoProgramada, setGuardandoProgramada] = useState(false);
+  const guardadoProgramadaRef = useRef(false);
 
   // Modales
   const [modalExpres, setModalExpres] = useState(false);
@@ -99,6 +103,9 @@ export default function App() {
   const [tecnicosInicio, setTecnicosInicio] = useState([]);
   const [modalHistorial, setModalHistorial] = useState(null);
   const [cargandoHistorial, setCargandoHistorial] = useState(false);
+  const [modalEditar, setModalEditar] = useState(null);
+  const [edicionTarea, setEdicionTarea] = useState(null);
+  const [guardandoEdicion, setGuardandoEdicion] = useState(false);
 
   const [modalTerminar, setModalTerminar] = useState(null);
   const [notasCierre, setNotasCierre] = useState('');
@@ -698,6 +705,182 @@ export default function App() {
     alert(esInicioEquipo ? 'Actividad iniciada. Se abrió el tiempo para el equipo seleccionado.' : 'Tu tiempo volvió a iniciar.');
   }
 
+  function abrirEditarTarea(tarea) {
+    if (usuarioActual?.rol !== 'admin') return;
+    setModalEditar(tarea);
+    setEdicionTarea({
+      titulo: tarea.titulo || '',
+      descripcion: tarea.descripcion || '',
+      ubicacion: tarea.ubicacion || '',
+      prioridad: tarea.prioridad || 'media',
+      fecha_programada: tarea.fecha_programada || hoyStr,
+      hora_programada: tarea.hora_programada ? String(tarea.hora_programada).slice(0, 5) : '',
+      tecnicos_seleccionados: [...new Set([...(tarea.tecnicos_ids || []), ...(tarea.tecnico_id ? [tarea.tecnico_id] : [])])],
+      notas_cierre: tarea.notas_cierre || '',
+      foto_antes: tarea.foto_antes || null,
+      foto_despues: tarea.foto_despues || null
+    });
+  }
+
+  function alternarTecnicoEdicion(id) {
+    setEdicionTarea(prev => ({
+      ...prev,
+      tecnicos_seleccionados: prev.tecnicos_seleccionados.includes(id)
+        ? prev.tecnicos_seleccionados.filter(x => x !== id)
+        : [...prev.tecnicos_seleccionados, id]
+    }));
+  }
+
+  async function guardarEdicionTarea() {
+    if (usuarioActual?.rol !== 'admin' || !modalEditar || !edicionTarea) return;
+    if (!edicionTarea.titulo.trim() || !edicionTarea.ubicacion.trim()) {
+      alert('Título y ubicación son obligatorios.');
+      return;
+    }
+    if (edicionTarea.tecnicos_seleccionados.length === 0) {
+      alert('Selecciona al menos un responsable.');
+      return;
+    }
+
+    setGuardandoEdicion(true);
+    try {
+      const { error } = await supabase.from('tareas').update({
+        titulo: edicionTarea.titulo.trim(),
+        descripcion: edicionTarea.descripcion,
+        ubicacion: edicionTarea.ubicacion.trim(),
+        prioridad: edicionTarea.prioridad,
+        fecha_programada: edicionTarea.fecha_programada,
+        hora_programada: edicionTarea.hora_programada || null,
+        tecnico_id: edicionTarea.tecnicos_seleccionados[0],
+        tecnicos_ids: edicionTarea.tecnicos_seleccionados,
+        notas_cierre: edicionTarea.notas_cierre || null,
+        foto_antes: edicionTarea.foto_antes || null,
+        foto_despues: edicionTarea.foto_despues || null
+      }).eq('id', modalEditar.id);
+
+      if (error) {
+        alert(`No se pudo editar la actividad: ${error.message}`);
+        return;
+      }
+
+      const nuevasFotos = [];
+      if (edicionTarea.foto_antes && edicionTarea.foto_antes !== modalEditar.foto_antes) {
+        nuevasFotos.push({ tarea_id: modalEditar.id, tecnico_id: usuarioActual.id, tipo: 'antes', url: edicionTarea.foto_antes, comentario: 'Evidencia agregada/corregida por administrador' });
+      }
+      if (edicionTarea.foto_despues && edicionTarea.foto_despues !== modalEditar.foto_despues) {
+        nuevasFotos.push({ tarea_id: modalEditar.id, tecnico_id: usuarioActual.id, tipo: 'despues', url: edicionTarea.foto_despues, comentario: 'Evidencia agregada/corregida por administrador' });
+      }
+      if (nuevasFotos.length) await supabase.from('fotos_tarea').insert(nuevasFotos);
+
+      setModalEditar(null);
+      setEdicionTarea(null);
+      await cargarTareas();
+      alert('Actividad actualizada correctamente.');
+    } finally {
+      setGuardandoEdicion(false);
+    }
+  }
+
+  function escaparHtml(valor) {
+    return String(valor ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  async function generarReporteIndividual(tarea) {
+    if (usuarioActual?.rol !== 'admin') return;
+
+    const ventana = window.open('', '_blank');
+    if (!ventana) {
+      alert('El navegador bloqueó la ventana del reporte. Permite ventanas emergentes para esta app.');
+      return;
+    }
+    ventana.document.write('<p style="font-family:Arial;padding:24px">Generando reporte individual...</p>');
+
+    const [sesionesR, avancesR, bloqueosR, fotosR] = await Promise.all([
+      supabase.from('sesiones_tarea').select('*').eq('tarea_id', tarea.id).order('fecha_inicio', { ascending: true }),
+      supabase.from('avances_tarea').select('*').eq('tarea_id', tarea.id),
+      supabase.from('bloqueos_tarea').select('*').eq('tarea_id', tarea.id),
+      supabase.from('fotos_tarea').select('*').eq('tarea_id', tarea.id).order('created_at', { ascending: true })
+    ]);
+
+    const sesiones = (sesionesR.data || []).filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico');
+    const avances = avancesR.data || [];
+    const bloqueos = bloqueosR.data || [];
+    const fotosHistorial = fotosR.data || [];
+    const nombres = perfiles
+      .filter(p => tarea.tecnicos_ids?.includes(p.id) || p.id === tarea.tecnico_id)
+      .map(p => p.nombre)
+      .join(', ') || 'Sin asignar';
+    const finalizo = perfiles.find(p => p.id === tarea.finalizado_por)?.nombre || 'No registrado';
+
+    const ahora = Date.now();
+    const segundosEquipo = sesiones.reduce((acc, s) => {
+      const ini = new Date(s.fecha_inicio).getTime();
+      const fin = s.fecha_fin ? new Date(s.fecha_fin).getTime() : ahora;
+      return acc + Math.max(0, Math.floor((fin - ini) / 1000));
+    }, 0);
+
+    const inicios = sesiones.map(s => new Date(s.fecha_inicio).getTime()).filter(Number.isFinite);
+    const inicioReal = tarea.fecha_inicio ? new Date(tarea.fecha_inicio).getTime() : (inicios.length ? Math.min(...inicios) : null);
+    const finReal = tarea.fecha_fin ? new Date(tarea.fecha_fin).getTime() : (tarea.fecha_completada ? new Date(tarea.fecha_completada).getTime() : null);
+    const duracionOrdenSeg = inicioReal && finReal ? Math.max(0, Math.floor((finReal - inicioReal) / 1000)) : 0;
+
+    const fotosUnicas = [];
+    const agregarFoto = (tipo, url, comentario='') => {
+      if (!url || fotosUnicas.some(f => f.url === url)) return;
+      fotosUnicas.push({ tipo, url, comentario });
+    };
+    agregarFoto('antes', tarea.foto_antes, 'Evidencia inicial');
+    fotosHistorial.forEach(f => agregarFoto(f.tipo, f.url, f.comentario || ''));
+    agregarFoto('después', tarea.foto_despues, 'Evidencia final');
+
+    const filasSesiones = sesiones.map(s => {
+      const p = perfiles.find(p => p.id === s.tecnico_id);
+      const ini = new Date(s.fecha_inicio);
+      const fin = s.fecha_fin ? new Date(s.fecha_fin) : null;
+      const seg = Math.max(0, Math.floor(((fin ? fin.getTime() : ahora) - ini.getTime()) / 1000));
+      return `<tr><td>${escaparHtml(p?.nombre || 'Técnico')}</td><td>${escaparHtml(ini.toLocaleString('es-MX'))}</td><td>${escaparHtml(fin ? fin.toLocaleString('es-MX') : 'En curso')}</td><td>${escaparHtml(formatearDuracion(seg))}</td><td>${escaparHtml(s.tipo_fin || '')}${s.notas ? ' • ' + escaparHtml(s.notas) : ''}</td></tr>`;
+    }).join('');
+
+    const evidenciasHtml = fotosUnicas.length ? fotosUnicas.map(f => `
+      <div class="foto"><div class="foto-titulo">${escaparHtml(f.tipo)}</div><img src="${f.url}" /><div class="muted">${escaparHtml(f.comentario)}</div></div>
+    `).join('') : '<p class="muted">Sin evidencia fotográfica.</p>';
+
+    const avancesHtml = avances.length ? avances.map(a => `<li><strong>${escaparHtml(perfiles.find(p => p.id === a.tecnico_id)?.nombre || 'Técnico')}</strong> — ${escaparHtml(a.porcentaje_avance || 0)}% — ${escaparHtml(a.notas_avance || 'Sin nota')}</li>`).join('') : '<li>Sin avances registrados.</li>';
+    const bloqueosHtml = bloqueos.length ? bloqueos.map(b => `<li><strong>${escaparHtml(b.motivo)}</strong> — ${escaparHtml(b.detalle || 'Sin detalle')}</li>`).join('') : '<li>Sin bloqueos registrados.</li>';
+
+    const folioCorto = `OT-${String(tarea.fecha_programada || '').replaceAll('-', '')}-${String(tarea.id || '').slice(0, 6).toUpperCase()}`;
+
+    ventana.document.open();
+    ventana.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${escaparHtml(folioCorto)} - ${escaparHtml(tarea.titulo)}</title>
+      <style>
+        body{font-family:Arial,sans-serif;color:#1e293b;margin:0;padding:28px;font-size:12px}h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin-top:22px;border-bottom:1px solid #cbd5e1;padding-bottom:5px}.muted{color:#64748b;font-size:10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}.box{border:1px solid #cbd5e1;border-radius:8px;padding:10px;margin-top:12px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top}th{background:#f1f5f9}.fotos{display:flex;flex-wrap:wrap;gap:12px}.foto{width:180px}.foto img{width:180px;height:135px;object-fit:cover;border:1px solid #cbd5e1;border-radius:6px}.foto-titulo{text-transform:capitalize;font-weight:bold;margin-bottom:4px}.acciones{margin-bottom:18px}.acciones button{padding:8px 12px;border:0;border-radius:6px;background:#0f172a;color:white;cursor:pointer}@media print{.acciones{display:none}body{padding:0}.foto{break-inside:avoid}}
+      </style></head><body>
+      <div class="acciones"><button onclick="window.print()">Imprimir / Guardar PDF</button></div>
+      <h1>Reporte individual de orden de trabajo</h1><div class="muted">${escaparHtml(folioCorto)} • Generado ${escaparHtml(new Date().toLocaleString('es-MX'))}</div>
+      <div class="box grid">
+        <div><strong>Actividad:</strong><br>${escaparHtml(tarea.titulo)}</div><div><strong>Estado:</strong><br>${escaparHtml(tarea.estado)}</div>
+        <div><strong>Ubicación:</strong><br>${escaparHtml(tarea.ubicacion)}</div><div><strong>Prioridad:</strong><br>${escaparHtml(tarea.prioridad || 'media')}</div>
+        <div><strong>Fecha programada:</strong><br>${escaparHtml(tarea.fecha_programada || '')}${tarea.hora_programada ? ' • '+escaparHtml(String(tarea.hora_programada).slice(0,5)) : ''}</div><div><strong>Responsable(s):</strong><br>${escaparHtml(nombres)}</div>
+        <div><strong>Inicio real:</strong><br>${escaparHtml(tarea.fecha_inicio ? new Date(tarea.fecha_inicio).toLocaleString('es-MX') : 'No registrado')}</div><div><strong>Finalización:</strong><br>${escaparHtml(tarea.fecha_fin || tarea.fecha_completada ? new Date(tarea.fecha_fin || tarea.fecha_completada).toLocaleString('es-MX') : 'No finalizada')}</div>
+        <div><strong>Duración de la orden:</strong><br>${escaparHtml(duracionOrdenSeg ? formatearDuracion(duracionOrdenSeg) : 'No disponible')}</div><div><strong>Tiempo efectivo del equipo:</strong><br>${escaparHtml(formatearDuracion(segundosEquipo))} persona</div>
+        <div><strong>Finalizada por:</strong><br>${escaparHtml(finalizo)}</div><div><strong>Origen:</strong><br>${escaparHtml(tarea.tipo_origen || 'programada')}</div>
+      </div>
+      <h2>Descripción / instrucciones</h2><p>${escaparHtml(tarea.descripcion || 'Sin descripción').replaceAll('\n','<br>')}</p>
+      <h2>Notas de cierre</h2><p>${escaparHtml(tarea.notas_cierre || 'Sin notas de cierre').replaceAll('\n','<br>')}</p>
+      <h2>Registro de tiempos</h2><table><thead><tr><th>Técnico</th><th>Inicio</th><th>Fin</th><th>Tiempo</th><th>Motivo/estado</th></tr></thead><tbody>${filasSesiones || '<tr><td colspan="5">Sin sesiones registradas.</td></tr>'}</tbody></table>
+      <h2>Avances / relevos</h2><ul>${avancesHtml}</ul>
+      <h2>Bloqueos</h2><ul>${bloqueosHtml}</ul>
+      <h2>Evidencias</h2><div class="fotos">${evidenciasHtml}</div>
+      <div class="muted" style="margin-top:24px">Enlace de consulta: ${escaparHtml(enlaceTarea(tarea.id))}</div>
+      </body></html>`);
+    ventana.document.close();
+  }
+
   async function cancelarTarea(tarea) {
     if (usuarioActual?.rol !== 'admin') return;
 
@@ -889,100 +1072,160 @@ export default function App() {
   function enviarAgendaHoyWhatsApp() {
     const hoy = new Date().toISOString().split('T')[0];
 
-    const actividadesHoy = tareas
-      .filter(t =>
-        t.fecha_programada === hoy &&
-        t.estado !== 'completada' &&
-        t.estado !== 'cancelada'
-      )
-      .sort((a, b) => {
-        const ha = a.hora_programada || '99:99:99';
-        const hb = b.hora_programada || '99:99:99';
-        return ha.localeCompare(hb);
-      });
+    const actividadesHoy = tareas.filter(t =>
+      t.fecha_programada === hoy &&
+      t.estado !== 'completada' &&
+      t.estado !== 'cancelada'
+    );
 
     if (actividadesHoy.length === 0) {
       alert('No hay actividades pendientes programadas para hoy.');
       return;
     }
 
-    const lineas = actividadesHoy.map((t, index) => {
+    // Las horas son referencias operativas. Se separan de las actividades generales
+    // para evitar que el equipo interprete que todo lo que tiene hora debe ejecutarse antes.
+    const conHora = actividadesHoy
+      .filter(t => Boolean(t.hora_programada))
+      .sort((a, b) => String(a.hora_programada).localeCompare(String(b.hora_programada)));
+
+    const sinHora = actividadesHoy
+      .filter(t => !t.hora_programada)
+      .sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+
+    const lineaActividad = (t, numero, mostrarHora = false) => {
       const nombres = perfiles
         .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
         .map(p => p.nombre.split(' ')[0])
         .join(' + ') || 'Sin asignar';
 
-      const hora = t.hora_programada
-        ? `🕐 ${String(t.hora_programada).slice(0, 5)}`
-        : '🕐 Sin hora específica';
+      const hora = mostrarHora && t.hora_programada
+        ? `\n🕐 ${String(t.hora_programada).slice(0, 5)}`
+        : '';
 
       return (
-        `*${index + 1}. ${t.titulo}*\n` +
-        `${hora}\n` +
-        `📍 ${t.ubicacion}\n` +
-        `👥 ${nombres}` +
+        `*${numero}. ${t.titulo}*` +
+        hora +
+        `\n📍 ${t.ubicacion}` +
+        `\n👥 ${nombres}` +
         (t.descripcion ? `\n📝 ${t.descripcion}` : '') +
         `\n📲 ${enlaceTarea(t.id)}`
       );
-    });
+    };
+
+    let numero = 1;
+    const secciones = [];
+
+    if (conHora.length > 0) {
+      secciones.push(
+        `⏰ *ACTIVIDADES CON HORA DE REFERENCIA*\n` +
+        `_No significa que deban hacerse todas primero; respetar la hora indicada y avanzar el resto entre ellas._\n\n` +
+        conHora.map(t => lineaActividad(t, numero++, true)).join('\n\n')
+      );
+    }
+
+    if (sinHora.length > 0) {
+      secciones.push(
+        `📋 *ACTIVIDADES GENERALES DEL DÍA*\n` +
+        `_Realizarlas en el orden listado, salvo urgencias o indicación del supervisor._\n\n` +
+        sinHora.map(t => lineaActividad(t, numero++, false)).join('\n\n')
+      );
+    }
 
     const mensaje = encodeURIComponent(
       `🛠️ *ACTIVIDADES PROGRAMADAS DE HOY*\n` +
       `📅 ${formatearFechaAgenda(hoy)}\n\n` +
-      lineas.join('\n\n') +
-      `\n\n📲 *Abrir Control de Mantenimiento:*\nhttps://mnttocapsec.vercel.app`
+      secciones.join('\n\n━━━━━━━━━━━━\n\n') +
+      `\n\n📲 *Abrir Control de Mantenimiento:*\n${window.location.origin}`
     );
 
-    // Sin API de pago: WhatsApp abre el selector y el administrador elige el grupo interno.
     window.open(`https://api.whatsapp.com/send?text=${mensaje}`, '_blank');
   }
 
   async function crearTareaProgramada(e) {
     e.preventDefault();
+
+    // Bloqueo inmediato (useRef) + bloqueo visual (state) para evitar doble/triple registro
+    // por doble toque, lentitud de red o reenvío accidental del formulario.
+    if (guardadoProgramadaRef.current) return;
+    guardadoProgramadaRef.current = true;
+    setGuardandoProgramada(true);
+
     const accion = e.nativeEvent?.submitter?.value || 'guardar';
     const notificarAhora = accion === 'guardar_notificar';
-    if (!nuevaTarea.titulo || !nuevaTarea.ubicacion || nuevaTarea.tecnicos_seleccionados.length === 0) {
-      alert('Completa los campos requeridos y selecciona al menos a un técnico.');
-      return;
-    }
+    const snapshot = {
+      ...nuevaTarea,
+      tecnicos_seleccionados: [...nuevaTarea.tecnicos_seleccionados]
+    };
 
-    const registrosParaInsertar = [];
-    const fechaInicio = new Date(nuevaTarea.fecha_programada + 'T00:00:00');
-    const fechaFin = nuevaTarea.es_recurrente ? new Date(nuevaTarea.fecha_fin + 'T00:00:00') : fechaInicio;
-
-    for (let d = new Date(fechaInicio); d <= fechaFin; d.setDate(d.getDate() + 1)) {
-      const diaSemana = d.getDay();
-      if (nuevaTarea.es_recurrente && (diaSemana === 0 || diaSemana === 6)) {
-        continue;
+    try {
+      if (!snapshot.titulo || !snapshot.ubicacion || snapshot.tecnicos_seleccionados.length === 0) {
+        alert('Completa los campos requeridos y selecciona al menos a un técnico.');
+        return;
       }
 
-      registrosParaInsertar.push({
-        titulo: nuevaTarea.titulo,
-        descripcion: nuevaTarea.descripcion,
-        ubicacion: nuevaTarea.ubicacion,
-        prioridad: nuevaTarea.prioridad,
-        tecnico_id: nuevaTarea.tecnicos_seleccionados[0],
-        tecnicos_ids: nuevaTarea.tecnicos_seleccionados,
-        creado_por: usuarioActual?.id,
-        tipo_origen: 'programada',
-        estado: 'pendiente',
-        fecha_programada: d.toISOString().split('T')[0],
-        hora_programada: nuevaTarea.hora_programada || null,
-        foto_antes: nuevaTarea.foto || null
-      });
-    }
+      const registrosParaInsertar = [];
+      const fechaInicio = new Date(snapshot.fecha_programada + 'T00:00:00');
+      const fechaFin = snapshot.es_recurrente ? new Date(snapshot.fecha_fin + 'T00:00:00') : fechaInicio;
 
-    const { data: tareasCreadas, error } = await supabase.from('tareas').insert(registrosParaInsertar).select('*');
+      for (let d = new Date(fechaInicio); d <= fechaFin; d.setDate(d.getDate() + 1)) {
+        const diaSemana = d.getDay();
+        if (snapshot.es_recurrente && (diaSemana === 0 || diaSemana === 6)) continue;
 
-    if (!error) {
-      // Si el administrador adjuntó una imagen al programar, conservarla también
-      // en el historial de evidencias de cada orden creada.
-      if (nuevaTarea.foto && tareasCreadas?.length) {
+        registrosParaInsertar.push({
+          titulo: snapshot.titulo,
+          descripcion: snapshot.descripcion,
+          ubicacion: snapshot.ubicacion,
+          prioridad: snapshot.prioridad,
+          tecnico_id: snapshot.tecnicos_seleccionados[0],
+          tecnicos_ids: snapshot.tecnicos_seleccionados,
+          creado_por: usuarioActual?.id,
+          tipo_origen: 'programada',
+          estado: 'pendiente',
+          fecha_programada: d.toISOString().split('T')[0],
+          hora_programada: snapshot.hora_programada || null,
+          foto_antes: snapshot.foto || null
+        });
+      }
+
+      // Advertencia contra duplicados ya existentes. Permite continuar si realmente se desea duplicar.
+      const normalizar = v => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const mismosIds = (a = [], b = []) => [...a].sort().join('|') === [...b].sort().join('|');
+      const duplicados = registrosParaInsertar.filter(nuevo =>
+        tareas.some(existente =>
+          existente.estado !== 'cancelada' &&
+          existente.fecha_programada === nuevo.fecha_programada &&
+          normalizar(existente.titulo) === normalizar(nuevo.titulo) &&
+          normalizar(existente.ubicacion) === normalizar(nuevo.ubicacion) &&
+          mismosIds(existente.tecnicos_ids || [existente.tecnico_id].filter(Boolean), nuevo.tecnicos_ids)
+        )
+      );
+
+      if (duplicados.length > 0) {
+        const continuar = window.confirm(
+          `Ya existe al menos una actividad igual para la misma fecha y responsables.\n\n` +
+          `¿Deseas guardarla de todos modos?\n\n` +
+          `Si no estás seguro, pulsa Cancelar para evitar duplicados.`
+        );
+        if (!continuar) return;
+      }
+
+      const { data: tareasCreadas, error } = await supabase
+        .from('tareas')
+        .insert(registrosParaInsertar)
+        .select('*');
+
+      if (error) {
+        alert(`No se pudo guardar la actividad: ${error.message}`);
+        return;
+      }
+
+      if (snapshot.foto && tareasCreadas?.length) {
         const evidencias = tareasCreadas.map(tareaCreada => ({
           tarea_id: tareaCreada.id,
           tecnico_id: usuarioActual?.id || null,
           tipo: 'antes',
-          url: nuevaTarea.foto,
+          url: snapshot.foto,
           comentario: 'Evidencia / referencia adjunta al programar la actividad'
         }));
         const { error: errorFotosProgramadas } = await supabase.from('fotos_tarea').insert(evidencias);
@@ -990,50 +1233,45 @@ export default function App() {
       }
 
       const nombresTecnicos = perfiles
-        .filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id))
+        .filter(p => snapshot.tecnicos_seleccionados.includes(p.id))
         .map(p => p.nombre.split(' ')[0])
         .join(', ');
 
       const mensajeWhatsApp = encodeURIComponent(
         `🛠️ *NUEVA ORDEN DE TRABAJO*\n\n` +
-        `📋 *Actividad:* ${nuevaTarea.titulo}\n` +
-        `📍 *Ubicación:* ${nuevaTarea.ubicacion}\n` +
+        `📋 *Actividad:* ${snapshot.titulo}\n` +
+        `📍 *Ubicación:* ${snapshot.ubicacion}\n` +
         `👥 *Responsable(s):* ${nombresTecnicos}\n` +
-        `📅 *Fecha:* ${nuevaTarea.fecha_programada}${nuevaTarea.es_recurrente ? ' al ' + nuevaTarea.fecha_fin + ' (Lun-Vie)' : ''}\n` +
-        (nuevaTarea.hora_programada ? `🕐 *Hora aproximada:* ${nuevaTarea.hora_programada}\n` : '') +
-        (nuevaTarea.descripcion ? `📝 *Detalle:* ${nuevaTarea.descripcion}\n` : '') +
-        (nuevaTarea.foto ? `📷 *Cuenta con imagen de referencia en la app*\n` : '') +
+        `📅 *Fecha:* ${snapshot.fecha_programada}${snapshot.es_recurrente ? ' al ' + snapshot.fecha_fin + ' (Lun-Vie)' : ''}\n` +
+        (snapshot.hora_programada ? `🕐 *Hora aproximada:* ${snapshot.hora_programada}\n` : '') +
+        (snapshot.descripcion ? `📝 *Detalle:* ${snapshot.descripcion}\n` : '') +
+        (snapshot.foto ? `📷 *Cuenta con imagen de referencia en la app*\n` : '') +
         `\n📲 *Ver actividad:* ${tareasCreadas?.length === 1 ? enlaceTarea(tareasCreadas[0].id) : window.location.origin}`
       );
 
-      setNuevaTarea({ 
-        titulo: '', 
-        descripcion: '', 
-        ubicacion: '', 
-        prioridad: 'media', 
-        fecha_programada: hoyStr,
-        hora_programada: '',
-        fecha_fin: hoyStr,
-        es_recurrente: false,
-        tecnicos_seleccionados: [],
-        foto: null
+      setNuevaTarea({
+        titulo: '', descripcion: '', ubicacion: '', prioridad: 'media',
+        fecha_programada: hoyStr, hora_programada: '', fecha_fin: hoyStr,
+        es_recurrente: false, tecnicos_seleccionados: [], foto: null
       });
-      cargarTareas();
+
+      await cargarTareas();
 
       if (notificarAhora) {
-        const tecnicosSeleccionados = perfiles.filter(p => nuevaTarea.tecnicos_seleccionados.includes(p.id));
-
+        const tecnicosSeleccionados = perfiles.filter(p => snapshot.tecnicos_seleccionados.includes(p.id));
         if (tecnicosSeleccionados.length === 1 && tecnicosSeleccionados[0].telefono) {
           const telefonoLimpio = tecnicosSeleccionados[0].telefono.replace(/\D/g, '');
           const telefonoMexico = telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`;
           window.open(`https://wa.me/${telefonoMexico}?text=${mensajeWhatsApp}`, '_blank');
         } else {
-          // Para equipos de varias personas se abre el selector para elegir el grupo/chat interno.
           window.open(`https://api.whatsapp.com/send?text=${mensajeWhatsApp}`, '_blank');
         }
       } else {
         alert('Actividad guardada. No se envió aviso por WhatsApp.');
       }
+    } finally {
+      guardadoProgramadaRef.current = false;
+      setGuardandoProgramada(false);
     }
   }
 
@@ -1388,7 +1626,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-sm sm:text-base leading-tight">Control de Mantenimiento Menor</h1>
-              <p className="text-[11px] text-slate-400">Campus Operativo</p>
+              <p className="text-[11px] text-slate-400">Campus Operativo <span className="text-slate-500">• v09.02.2</span></p>
             </div>
           </div>
 
@@ -1636,16 +1874,18 @@ export default function App() {
                     <button
                       type="submit"
                       value="guardar"
-                      className="bg-slate-700 hover:bg-slate-800 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
+                      disabled={guardandoProgramada}
+                      className="bg-slate-700 hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
                     >
-                      <CheckCircle2 className="w-4 h-4" /> Guardar sin notificar
+                      <CheckCircle2 className="w-4 h-4" /> {guardandoProgramada ? 'Guardando...' : 'Guardar sin notificar'}
                     </button>
                     <button
                       type="submit"
                       value="guardar_notificar"
-                      className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
+                      disabled={guardandoProgramada}
+                      className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-lg transition shadow-sm flex items-center justify-center gap-2"
                     >
-                      <Send className="w-4 h-4" /> Guardar y notificar ahora
+                      <Send className="w-4 h-4" /> {guardandoProgramada ? 'Guardando...' : 'Guardar y notificar ahora'}
                     </button>
                   </div>
                 </form>
@@ -1892,24 +2132,41 @@ export default function App() {
                         )}
 
 
+                        {usuarioActual.rol === 'admin' && (
+                          <div className="mt-3 pt-3 border-t border-violet-100 grid grid-cols-1 sm:grid-cols-2 gap-2 print:hidden">
+                            <button
+                              onClick={() => abrirEditarTarea(t)}
+                              className="bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition shadow-sm"
+                            >
+                              <Pencil className="w-4 h-4" /> Editar actividad
+                            </button>
+                            <button
+                              onClick={() => generarReporteIndividual(t)}
+                              className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition shadow-sm"
+                            >
+                              <Printer className="w-4 h-4" /> Reporte individual / PDF
+                            </button>
+                          </div>
+                        )}
+
                         {(usuarioActual.rol === 'admin' || estaAsignadoATarea(t)) && (
                           <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 print:hidden">
-                          <button
-                            onClick={() => abrirHistorial(t)}
-                            className="mt-2 w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition print:hidden"
-                          >
-                            <Eye className="w-4 h-4" /> Ver detalle / historial
-                          </button>
-                          <button
-                            onClick={async () => {
-                              const url = enlaceTarea(t.id);
-                              try { await navigator.clipboard.writeText(url); alert('Enlace de la actividad copiado.'); }
-                              catch { window.prompt('Copia este enlace:', url); }
-                            }}
-                            className="bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
-                          >
-                            <Link2 className="w-4 h-4" /> Copiar enlace
-                          </button>
+                            <button
+                              onClick={() => abrirHistorial(t)}
+                              className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                            >
+                              <Eye className="w-4 h-4" /> Ver detalle / historial
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const url = enlaceTarea(t.id);
+                                try { await navigator.clipboard.writeText(url); alert('Enlace de la actividad copiado.'); }
+                                catch { window.prompt('Copia este enlace:', url); }
+                              }}
+                              className="bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold py-2 px-2.5 rounded-lg flex items-center justify-center gap-1 transition"
+                            >
+                              <Link2 className="w-4 h-4" /> Copiar enlace
+                            </button>
                           </div>
                         )}
                       </div>
@@ -2197,6 +2454,50 @@ export default function App() {
         >
           <PlusCircle className="w-4 h-4" /> {usuarioActual.rol === 'admin' ? '+ Reportar hallazgo' : '+ Exprés / Hallazgo'}
         </button>
+      )}
+
+      {/* MODAL EDITAR ACTIVIDAD - SOLO ADMIN */}
+      {modalEditar && edicionTarea && usuarioActual.rol === 'admin' && (
+        <div className="fixed inset-0 bg-black/50 z-[65] flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-5 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-start gap-3">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">Editar actividad</h3>
+                <p className="text-[10px] text-slate-500">Solo el administrador puede corregir datos y evidencias.</p>
+              </div>
+              <button onClick={() => { setModalEditar(null); setEdicionTarea(null); }} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="sm:col-span-2"><label className="font-semibold text-slate-600 block mb-1">Título</label><input value={edicionTarea.titulo} onChange={e=>setEdicionTarea({...edicionTarea,titulo:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+              <div className="sm:col-span-2"><label className="font-semibold text-slate-600 block mb-1">Descripción / instrucciones</label><textarea rows={3} value={edicionTarea.descripcion} onChange={e=>setEdicionTarea({...edicionTarea,descripcion:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+              <div><label className="font-semibold text-slate-600 block mb-1">Ubicación</label><input value={edicionTarea.ubicacion} onChange={e=>setEdicionTarea({...edicionTarea,ubicacion:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+              <div><label className="font-semibold text-slate-600 block mb-1">Prioridad</label><select value={edicionTarea.prioridad} onChange={e=>setEdicionTarea({...edicionTarea,prioridad:e.target.value})} className="w-full p-2.5 border rounded-lg bg-white"><option value="baja">Baja</option><option value="media">Media</option><option value="alta">Alta</option><option value="urgente">Urgente</option></select></div>
+              <div><label className="font-semibold text-slate-600 block mb-1">Fecha</label><input type="date" value={edicionTarea.fecha_programada} onChange={e=>setEdicionTarea({...edicionTarea,fecha_programada:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+              <div><label className="font-semibold text-slate-600 block mb-1">Hora aproximada</label><input type="time" value={edicionTarea.hora_programada} onChange={e=>setEdicionTarea({...edicionTarea,hora_programada:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+
+              <div className="sm:col-span-2">
+                <label className="font-semibold text-slate-600 block mb-1">Responsables</label>
+                <div className="flex flex-wrap gap-2">{tecnicosLista.map(p => <button type="button" key={p.id} onClick={()=>alternarTecnicoEdicion(p.id)} className={`px-3 py-1.5 rounded-lg border font-semibold ${edicionTarea.tecnicos_seleccionados.includes(p.id)?'bg-blue-600 text-white border-blue-600':'bg-white text-slate-700 border-slate-300'}`}>{p.nombre.split(' ')[0]}</button>)}</div>
+              </div>
+
+              <div className="sm:col-span-2"><label className="font-semibold text-slate-600 block mb-1">Notas de cierre</label><textarea rows={2} value={edicionTarea.notas_cierre} onChange={e=>setEdicionTarea({...edicionTarea,notas_cierre:e.target.value})} className="w-full p-2.5 border rounded-lg" /></div>
+
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Foto antes / referencia</label>
+                {edicionTarea.foto_antes && <img src={edicionTarea.foto_antes} alt="Antes" className="w-full h-28 object-cover rounded-lg border mb-2" />}
+                <label className="block cursor-pointer bg-slate-100 hover:bg-slate-200 text-center p-2 rounded-lg"><FileText className="w-4 h-4 inline mr-1"/>Subir/cambiar<input type="file" accept="image/*" className="hidden" onChange={e=>procesarFoto(e,foto=>setEdicionTarea(prev=>({...prev,foto_antes:foto})))} /></label>
+              </div>
+              <div>
+                <label className="font-semibold text-slate-600 block mb-1">Foto después</label>
+                {edicionTarea.foto_despues && <img src={edicionTarea.foto_despues} alt="Después" className="w-full h-28 object-cover rounded-lg border mb-2" />}
+                <label className="block cursor-pointer bg-slate-100 hover:bg-slate-200 text-center p-2 rounded-lg"><FileText className="w-4 h-4 inline mr-1"/>Subir/cambiar<input type="file" accept="image/*" className="hidden" onChange={e=>procesarFoto(e,foto=>setEdicionTarea(prev=>({...prev,foto_despues:foto})))} /></label>
+              </div>
+            </div>
+
+            <button disabled={guardandoEdicion} onClick={guardarEdicionTarea} className="w-full bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white font-bold text-xs py-3 rounded-lg">{guardandoEdicion?'Guardando cambios...':'Guardar correcciones'}</button>
+          </div>
+        </div>
       )}
 
       {/* MODAL HISTORIAL / DETALLE */}
