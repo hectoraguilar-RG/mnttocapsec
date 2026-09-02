@@ -33,7 +33,8 @@ import {
   ArrowRightLeft,
   Link2,
   Pencil,
-  Printer
+  Printer,
+  Search
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -85,6 +86,7 @@ export default function App() {
   // Filtros
   const [filtroEstado, setFiltroEstado] = useState('todas');
   const [filtroTecnicoAdmin, setFiltroTecnicoAdmin] = useState('todos');
+  const [busquedaTarea, setBusquedaTarea] = useState('');
   const [tipoPeriodoReporte, setTipoPeriodoReporte] = useState('semanal');
   const [fechaReferenciaReporte, setFechaReferenciaReporte] = useState(new Date().toISOString().split('T')[0]);
   const [guardandoProgramada, setGuardandoProgramada] = useState(false);
@@ -1418,10 +1420,34 @@ export default function App() {
   }
 
   // Filtrado de Tareas
+  // El buscador se combina con el filtro activo: por ejemplo, Terminadas + "puerta".
   const tareasFiltradas = tareas.filter(t => {
     if (usuarioActual?.rol === 'admin' && filtroTecnicoAdmin !== 'todos') {
       const corresponde = t.tecnico_id === filtroTecnicoAdmin || t.tecnicos_ids?.includes(filtroTecnicoAdmin);
       if (!corresponde) return false;
+    }
+
+    const terminoBusqueda = busquedaTarea.trim().toLocaleLowerCase('es-MX');
+    if (terminoBusqueda) {
+      const responsablesBusqueda = perfiles
+        .filter(p => t.tecnicos_ids?.includes(p.id) || p.id === t.tecnico_id)
+        .map(p => p.nombre)
+        .join(' ');
+
+      const textoBusqueda = [
+        t.titulo,
+        t.ubicacion,
+        t.descripcion,
+        t.notas_cierre,
+        t.fecha_programada,
+        t.hora_programada,
+        responsablesBusqueda
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase('es-MX');
+
+      if (!textoBusqueda.includes(terminoBusqueda)) return false;
     }
 
     const esFutura = Boolean(t.fecha_programada && t.fecha_programada > hoyStr);
@@ -1626,7 +1652,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-sm sm:text-base leading-tight">Control de Mantenimiento Menor</h1>
-              <p className="text-[11px] text-slate-400">Campus Operativo <span className="text-slate-500">• v09.02.2</span></p>
+              <p className="text-[11px] text-slate-400">Campus Operativo <span className="text-slate-500">• v09.02.3</span></p>
             </div>
           </div>
 
@@ -1917,6 +1943,27 @@ export default function App() {
                     {tareasFiltradas.length} órdenes
                   </span>
                 </div>
+              </div>
+
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                <input
+                  type="search"
+                  value={busquedaTarea}
+                  onChange={e => setBusquedaTarea(e.target.value)}
+                  placeholder="Buscar actividad, ubicación, responsable o detalle..."
+                  className="w-full bg-white border border-slate-300 rounded-xl py-2.5 pl-9 pr-10 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
+                />
+                {busquedaTarea && (
+                  <button
+                    type="button"
+                    onClick={() => setBusquedaTarea('')}
+                    title="Limpiar búsqueda"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-md"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
               {cargando ? (
