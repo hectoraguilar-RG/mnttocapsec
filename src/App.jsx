@@ -108,6 +108,9 @@ export default function App() {
   const [modalEditar, setModalEditar] = useState(null);
   const [edicionTarea, setEdicionTarea] = useState(null);
   const [guardandoEdicion, setGuardandoEdicion] = useState(false);
+  const [reporteIndividual, setReporteIndividual] = useState(null);
+  const [generandoReporteIndividual, setGenerandoReporteIndividual] = useState(false);
+  const reporteIframeRef = useRef(null);
 
   const [modalTerminar, setModalTerminar] = useState(null);
   const [notasCierre, setNotasCierre] = useState('');
@@ -795,92 +798,134 @@ export default function App() {
   async function generarReporteIndividual(tarea) {
     if (usuarioActual?.rol !== 'admin') return;
 
-    const ventana = window.open('', '_blank');
-    if (!ventana) {
-      alert('El navegador bloqueó la ventana del reporte. Permite ventanas emergentes para esta app.');
+    setGenerandoReporteIndividual(true);
+    try {
+      const [sesionesR, avancesR, bloqueosR, fotosR] = await Promise.all([
+        supabase.from('sesiones_tarea').select('*').eq('tarea_id', tarea.id).order('fecha_inicio', { ascending: true }),
+        supabase.from('avances_tarea').select('*').eq('tarea_id', tarea.id),
+        supabase.from('bloqueos_tarea').select('*').eq('tarea_id', tarea.id),
+        supabase.from('fotos_tarea').select('*').eq('tarea_id', tarea.id).order('created_at', { ascending: true })
+      ]);
+
+      const sesiones = (sesionesR.data || []).filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico');
+      const avances = avancesR.data || [];
+      const bloqueos = bloqueosR.data || [];
+      const fotosHistorial = fotosR.data || [];
+      const nombres = perfiles
+        .filter(p => tarea.tecnicos_ids?.includes(p.id) || p.id === tarea.tecnico_id)
+        .map(p => p.nombre)
+        .join(', ') || 'Sin asignar';
+      const finalizo = perfiles.find(p => p.id === tarea.finalizado_por)?.nombre || 'No registrado';
+
+      const ahora = Date.now();
+      const segundosEquipo = sesiones.reduce((acc, s) => {
+        const ini = new Date(s.fecha_inicio).getTime();
+        const fin = s.fecha_fin ? new Date(s.fecha_fin).getTime() : ahora;
+        return acc + Math.max(0, Math.floor((fin - ini) / 1000));
+      }, 0);
+
+      const inicios = sesiones.map(s => new Date(s.fecha_inicio).getTime()).filter(Number.isFinite);
+      const inicioReal = tarea.fecha_inicio ? new Date(tarea.fecha_inicio).getTime() : (inicios.length ? Math.min(...inicios) : null);
+      const finReal = tarea.fecha_fin ? new Date(tarea.fecha_fin).getTime() : (tarea.fecha_completada ? new Date(tarea.fecha_completada).getTime() : null);
+      const duracionOrdenSeg = inicioReal && finReal ? Math.max(0, Math.floor((finReal - inicioReal) / 1000)) : 0;
+
+      const fotosUnicas = [];
+      const agregarFoto = (tipo, url, comentario='') => {
+        if (!url || fotosUnicas.some(f => f.url === url)) return;
+        fotosUnicas.push({ tipo, url, comentario });
+      };
+      agregarFoto('antes', tarea.foto_antes, 'Evidencia inicial');
+      fotosHistorial.forEach(f => agregarFoto(f.tipo, f.url, f.comentario || ''));
+      agregarFoto('después', tarea.foto_despues, 'Evidencia final');
+
+      const filasSesiones = sesiones.map(s => {
+        const p = perfiles.find(p => p.id === s.tecnico_id);
+        const ini = new Date(s.fecha_inicio);
+        const fin = s.fecha_fin ? new Date(s.fecha_fin) : null;
+        const seg = Math.max(0, Math.floor(((fin ? fin.getTime() : ahora) - ini.getTime()) / 1000));
+        return `<tr><td>${escaparHtml(p?.nombre || 'Técnico')}</td><td>${escaparHtml(ini.toLocaleString('es-MX'))}</td><td>${escaparHtml(fin ? fin.toLocaleString('es-MX') : 'En curso')}</td><td>${escaparHtml(formatearDuracion(seg))}</td><td>${escaparHtml(s.tipo_fin || '')}${s.notas ? ' • ' + escaparHtml(s.notas) : ''}</td></tr>`;
+      }).join('');
+
+      const evidenciasHtml = fotosUnicas.length ? fotosUnicas.map(f => `
+        <div class="foto"><div class="foto-titulo">${escaparHtml(f.tipo)}</div><img src="${f.url}" /><div class="muted">${escaparHtml(f.comentario)}</div></div>
+      `).join('') : '<p class="muted">Sin evidencia fotográfica.</p>';
+
+      const avancesHtml = avances.length ? avances.map(a => `<li><strong>${escaparHtml(perfiles.find(p => p.id === a.tecnico_id)?.nombre || 'Técnico')}</strong> — ${escaparHtml(a.porcentaje_avance || 0)}% — ${escaparHtml(a.notas_avance || 'Sin nota')}</li>`).join('') : '<li>Sin avances registrados.</li>';
+      const bloqueosHtml = bloqueos.length ? bloqueos.map(b => `<li><strong>${escaparHtml(b.motivo)}</strong> — ${escaparHtml(b.detalle || 'Sin detalle')}</li>`).join('') : '<li>Sin bloqueos registrados.</li>';
+
+      const folioCorto = `OT-${String(tarea.fecha_programada || '').replaceAll('-', '')}-${String(tarea.id || '').slice(0, 6).toUpperCase()}`;
+
+      const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escaparHtml(folioCorto)} - ${escaparHtml(tarea.titulo)}</title>
+        <style>
+          body{font-family:Arial,sans-serif;color:#1e293b;margin:0;padding:18px;font-size:12px;background:white}h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin-top:22px;border-bottom:1px solid #cbd5e1;padding-bottom:5px}.muted{color:#64748b;font-size:10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}.box{border:1px solid #cbd5e1;border-radius:8px;padding:10px;margin-top:12px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top}th{background:#f1f5f9}.fotos{display:flex;flex-wrap:wrap;gap:12px}.foto{width:180px}.foto img{width:180px;height:135px;object-fit:cover;border:1px solid #cbd5e1;border-radius:6px}.foto-titulo{text-transform:capitalize;font-weight:bold;margin-bottom:4px}@media(max-width:640px){body{padding:12px}.grid{grid-template-columns:1fr}.foto,.foto img{width:145px}.foto img{height:110px}}@media print{body{padding:0}.foto{break-inside:avoid}}
+        </style></head><body>
+        <h1>Reporte individual de orden de trabajo</h1><div class="muted">${escaparHtml(folioCorto)} • Generado ${escaparHtml(new Date().toLocaleString('es-MX'))}</div>
+        <div class="box grid">
+          <div><strong>Actividad:</strong><br>${escaparHtml(tarea.titulo)}</div><div><strong>Estado:</strong><br>${escaparHtml(tarea.estado)}</div>
+          <div><strong>Ubicación:</strong><br>${escaparHtml(tarea.ubicacion)}</div><div><strong>Prioridad:</strong><br>${escaparHtml(tarea.prioridad || 'media')}</div>
+          <div><strong>Fecha programada:</strong><br>${escaparHtml(tarea.fecha_programada || '')}${tarea.hora_programada ? ' • '+escaparHtml(String(tarea.hora_programada).slice(0,5)) : ''}</div><div><strong>Responsable(s):</strong><br>${escaparHtml(nombres)}</div>
+          <div><strong>Inicio real:</strong><br>${escaparHtml(tarea.fecha_inicio ? new Date(tarea.fecha_inicio).toLocaleString('es-MX') : 'No registrado')}</div><div><strong>Finalización:</strong><br>${escaparHtml(tarea.fecha_fin || tarea.fecha_completada ? new Date(tarea.fecha_fin || tarea.fecha_completada).toLocaleString('es-MX') : 'No finalizada')}</div>
+          <div><strong>Duración de la orden:</strong><br>${escaparHtml(duracionOrdenSeg ? formatearDuracion(duracionOrdenSeg) : 'No disponible')}</div><div><strong>Tiempo efectivo del equipo:</strong><br>${escaparHtml(formatearDuracion(segundosEquipo))} persona</div>
+          <div><strong>Finalizada por:</strong><br>${escaparHtml(finalizo)}</div><div><strong>Origen:</strong><br>${escaparHtml(tarea.tipo_origen || 'programada')}</div>
+        </div>
+        <h2>Descripción / instrucciones</h2><p>${escaparHtml(tarea.descripcion || 'Sin descripción').replaceAll('\n','<br>')}</p>
+        <h2>Notas de cierre</h2><p>${escaparHtml(tarea.notas_cierre || 'Sin notas de cierre').replaceAll('\n','<br>')}</p>
+        <h2>Registro de tiempos</h2><table><thead><tr><th>Técnico</th><th>Inicio</th><th>Fin</th><th>Tiempo</th><th>Motivo/estado</th></tr></thead><tbody>${filasSesiones || '<tr><td colspan="5">Sin sesiones registradas.</td></tr>'}</tbody></table>
+        <h2>Avances / relevos</h2><ul>${avancesHtml}</ul>
+        <h2>Bloqueos</h2><ul>${bloqueosHtml}</ul>
+        <h2>Evidencias</h2><div class="fotos">${evidenciasHtml}</div>
+        <div class="muted" style="margin-top:24px">Enlace de consulta: ${escaparHtml(enlaceTarea(tarea.id))}</div>
+        </body></html>`;
+
+      setReporteIndividual({
+        tarea,
+        html,
+        folio: folioCorto,
+        enlace: enlaceTarea(tarea.id)
+      });
+    } catch (error) {
+      console.error('Error generando reporte individual:', error);
+      alert('No se pudo generar el reporte individual.');
+    } finally {
+      setGenerandoReporteIndividual(false);
+    }
+  }
+
+  function imprimirReporteIndividual() {
+    const iframe = reporteIframeRef.current;
+    if (!iframe?.contentWindow) {
+      alert('No se pudo abrir la vista de impresión.');
       return;
     }
-    ventana.document.write('<p style="font-family:Arial;padding:24px">Generando reporte individual...</p>');
+    iframe.contentWindow.focus();
+    iframe.contentWindow.print();
+  }
 
-    const [sesionesR, avancesR, bloqueosR, fotosR] = await Promise.all([
-      supabase.from('sesiones_tarea').select('*').eq('tarea_id', tarea.id).order('fecha_inicio', { ascending: true }),
-      supabase.from('avances_tarea').select('*').eq('tarea_id', tarea.id),
-      supabase.from('bloqueos_tarea').select('*').eq('tarea_id', tarea.id),
-      supabase.from('fotos_tarea').select('*').eq('tarea_id', tarea.id).order('created_at', { ascending: true })
-    ]);
+  async function compartirReporteIndividual() {
+    if (!reporteIndividual) return;
 
-    const sesiones = (sesionesR.data || []).filter(s => perfiles.find(p => p.id === s.tecnico_id)?.rol === 'tecnico');
-    const avances = avancesR.data || [];
-    const bloqueos = bloqueosR.data || [];
-    const fotosHistorial = fotosR.data || [];
-    const nombres = perfiles
-      .filter(p => tarea.tecnicos_ids?.includes(p.id) || p.id === tarea.tecnico_id)
-      .map(p => p.nombre)
-      .join(', ') || 'Sin asignar';
-    const finalizo = perfiles.find(p => p.id === tarea.finalizado_por)?.nombre || 'No registrado';
+    const titulo = `${reporteIndividual.folio} - ${reporteIndividual.tarea.titulo}`;
+    const texto = `Reporte de actividad: ${reporteIndividual.tarea.titulo}\nUbicación: ${reporteIndividual.tarea.ubicacion}\nEstado: ${reporteIndividual.tarea.estado}`;
 
-    const ahora = Date.now();
-    const segundosEquipo = sesiones.reduce((acc, s) => {
-      const ini = new Date(s.fecha_inicio).getTime();
-      const fin = s.fecha_fin ? new Date(s.fecha_fin).getTime() : ahora;
-      return acc + Math.max(0, Math.floor((fin - ini) / 1000));
-    }, 0);
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: titulo,
+          text: texto,
+          url: reporteIndividual.enlace
+        });
+        return;
+      } catch (error) {
+        if (error?.name === 'AbortError') return;
+      }
+    }
 
-    const inicios = sesiones.map(s => new Date(s.fecha_inicio).getTime()).filter(Number.isFinite);
-    const inicioReal = tarea.fecha_inicio ? new Date(tarea.fecha_inicio).getTime() : (inicios.length ? Math.min(...inicios) : null);
-    const finReal = tarea.fecha_fin ? new Date(tarea.fecha_fin).getTime() : (tarea.fecha_completada ? new Date(tarea.fecha_completada).getTime() : null);
-    const duracionOrdenSeg = inicioReal && finReal ? Math.max(0, Math.floor((finReal - inicioReal) / 1000)) : 0;
-
-    const fotosUnicas = [];
-    const agregarFoto = (tipo, url, comentario='') => {
-      if (!url || fotosUnicas.some(f => f.url === url)) return;
-      fotosUnicas.push({ tipo, url, comentario });
-    };
-    agregarFoto('antes', tarea.foto_antes, 'Evidencia inicial');
-    fotosHistorial.forEach(f => agregarFoto(f.tipo, f.url, f.comentario || ''));
-    agregarFoto('después', tarea.foto_despues, 'Evidencia final');
-
-    const filasSesiones = sesiones.map(s => {
-      const p = perfiles.find(p => p.id === s.tecnico_id);
-      const ini = new Date(s.fecha_inicio);
-      const fin = s.fecha_fin ? new Date(s.fecha_fin) : null;
-      const seg = Math.max(0, Math.floor(((fin ? fin.getTime() : ahora) - ini.getTime()) / 1000));
-      return `<tr><td>${escaparHtml(p?.nombre || 'Técnico')}</td><td>${escaparHtml(ini.toLocaleString('es-MX'))}</td><td>${escaparHtml(fin ? fin.toLocaleString('es-MX') : 'En curso')}</td><td>${escaparHtml(formatearDuracion(seg))}</td><td>${escaparHtml(s.tipo_fin || '')}${s.notas ? ' • ' + escaparHtml(s.notas) : ''}</td></tr>`;
-    }).join('');
-
-    const evidenciasHtml = fotosUnicas.length ? fotosUnicas.map(f => `
-      <div class="foto"><div class="foto-titulo">${escaparHtml(f.tipo)}</div><img src="${f.url}" /><div class="muted">${escaparHtml(f.comentario)}</div></div>
-    `).join('') : '<p class="muted">Sin evidencia fotográfica.</p>';
-
-    const avancesHtml = avances.length ? avances.map(a => `<li><strong>${escaparHtml(perfiles.find(p => p.id === a.tecnico_id)?.nombre || 'Técnico')}</strong> — ${escaparHtml(a.porcentaje_avance || 0)}% — ${escaparHtml(a.notas_avance || 'Sin nota')}</li>`).join('') : '<li>Sin avances registrados.</li>';
-    const bloqueosHtml = bloqueos.length ? bloqueos.map(b => `<li><strong>${escaparHtml(b.motivo)}</strong> — ${escaparHtml(b.detalle || 'Sin detalle')}</li>`).join('') : '<li>Sin bloqueos registrados.</li>';
-
-    const folioCorto = `OT-${String(tarea.fecha_programada || '').replaceAll('-', '')}-${String(tarea.id || '').slice(0, 6).toUpperCase()}`;
-
-    ventana.document.open();
-    ventana.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${escaparHtml(folioCorto)} - ${escaparHtml(tarea.titulo)}</title>
-      <style>
-        body{font-family:Arial,sans-serif;color:#1e293b;margin:0;padding:28px;font-size:12px}h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin-top:22px;border-bottom:1px solid #cbd5e1;padding-bottom:5px}.muted{color:#64748b;font-size:10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}.box{border:1px solid #cbd5e1;border-radius:8px;padding:10px;margin-top:12px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top}th{background:#f1f5f9}.fotos{display:flex;flex-wrap:wrap;gap:12px}.foto{width:180px}.foto img{width:180px;height:135px;object-fit:cover;border:1px solid #cbd5e1;border-radius:6px}.foto-titulo{text-transform:capitalize;font-weight:bold;margin-bottom:4px}.acciones{margin-bottom:18px}.acciones button{padding:8px 12px;border:0;border-radius:6px;background:#0f172a;color:white;cursor:pointer}@media print{.acciones{display:none}body{padding:0}.foto{break-inside:avoid}}
-      </style></head><body>
-      <div class="acciones"><button onclick="window.print()">Imprimir / Guardar PDF</button></div>
-      <h1>Reporte individual de orden de trabajo</h1><div class="muted">${escaparHtml(folioCorto)} • Generado ${escaparHtml(new Date().toLocaleString('es-MX'))}</div>
-      <div class="box grid">
-        <div><strong>Actividad:</strong><br>${escaparHtml(tarea.titulo)}</div><div><strong>Estado:</strong><br>${escaparHtml(tarea.estado)}</div>
-        <div><strong>Ubicación:</strong><br>${escaparHtml(tarea.ubicacion)}</div><div><strong>Prioridad:</strong><br>${escaparHtml(tarea.prioridad || 'media')}</div>
-        <div><strong>Fecha programada:</strong><br>${escaparHtml(tarea.fecha_programada || '')}${tarea.hora_programada ? ' • '+escaparHtml(String(tarea.hora_programada).slice(0,5)) : ''}</div><div><strong>Responsable(s):</strong><br>${escaparHtml(nombres)}</div>
-        <div><strong>Inicio real:</strong><br>${escaparHtml(tarea.fecha_inicio ? new Date(tarea.fecha_inicio).toLocaleString('es-MX') : 'No registrado')}</div><div><strong>Finalización:</strong><br>${escaparHtml(tarea.fecha_fin || tarea.fecha_completada ? new Date(tarea.fecha_fin || tarea.fecha_completada).toLocaleString('es-MX') : 'No finalizada')}</div>
-        <div><strong>Duración de la orden:</strong><br>${escaparHtml(duracionOrdenSeg ? formatearDuracion(duracionOrdenSeg) : 'No disponible')}</div><div><strong>Tiempo efectivo del equipo:</strong><br>${escaparHtml(formatearDuracion(segundosEquipo))} persona</div>
-        <div><strong>Finalizada por:</strong><br>${escaparHtml(finalizo)}</div><div><strong>Origen:</strong><br>${escaparHtml(tarea.tipo_origen || 'programada')}</div>
-      </div>
-      <h2>Descripción / instrucciones</h2><p>${escaparHtml(tarea.descripcion || 'Sin descripción').replaceAll('\n','<br>')}</p>
-      <h2>Notas de cierre</h2><p>${escaparHtml(tarea.notas_cierre || 'Sin notas de cierre').replaceAll('\n','<br>')}</p>
-      <h2>Registro de tiempos</h2><table><thead><tr><th>Técnico</th><th>Inicio</th><th>Fin</th><th>Tiempo</th><th>Motivo/estado</th></tr></thead><tbody>${filasSesiones || '<tr><td colspan="5">Sin sesiones registradas.</td></tr>'}</tbody></table>
-      <h2>Avances / relevos</h2><ul>${avancesHtml}</ul>
-      <h2>Bloqueos</h2><ul>${bloqueosHtml}</ul>
-      <h2>Evidencias</h2><div class="fotos">${evidenciasHtml}</div>
-      <div class="muted" style="margin-top:24px">Enlace de consulta: ${escaparHtml(enlaceTarea(tarea.id))}</div>
-      </body></html>`);
-    ventana.document.close();
+    try {
+      await navigator.clipboard.writeText(reporteIndividual.enlace);
+      alert('El enlace de la actividad se copió. Puedes pegarlo en WhatsApp, correo u otra aplicación.');
+    } catch {
+      window.prompt('Copia este enlace:', reporteIndividual.enlace);
+    }
   }
 
   async function cancelarTarea(tarea) {
@@ -1652,7 +1697,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-sm sm:text-base leading-tight">Control de Mantenimiento Menor</h1>
-              <p className="text-[11px] text-slate-400">Campus Operativo <span className="text-slate-500">• v09.02.3</span></p>
+              <p className="text-[11px] text-slate-400">Campus Operativo <span className="text-slate-500">• v09.02.4</span></p>
             </div>
           </div>
 
@@ -2501,6 +2546,60 @@ export default function App() {
         >
           <PlusCircle className="w-4 h-4" /> {usuarioActual.rol === 'admin' ? '+ Reportar hallazgo' : '+ Exprés / Hallazgo'}
         </button>
+      )}
+
+      {/* REPORTE INDIVIDUAL DENTRO DE LA APP / PWA */}
+      {reporteIndividual && usuarioActual.rol === 'admin' && (
+        <div className="fixed inset-0 z-[90] bg-slate-100 flex flex-col print:hidden">
+          <div className="bg-slate-900 text-white px-3 py-2.5 shadow-md flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setReporteIndividual(null)}
+              className="bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1.5"
+            >
+              ← Volver a actividades
+            </button>
+
+            <div className="min-w-0 flex-1 text-center">
+              <p className="text-xs font-bold truncate">Reporte de actividad</p>
+              <p className="text-[10px] text-slate-400 truncate">{reporteIndividual.folio} • {reporteIndividual.tarea.titulo}</p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={compartirReporteIndividual}
+                className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-2 rounded-lg"
+              >
+                📤 Compartir
+              </button>
+              <button
+                type="button"
+                onClick={imprimirReporteIndividual}
+                className="bg-white hover:bg-slate-100 text-slate-900 text-xs font-semibold px-3 py-2 rounded-lg"
+              >
+                🖨️ PDF
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 bg-slate-200 p-2 sm:p-4">
+            <iframe
+              ref={reporteIframeRef}
+              title={`Reporte ${reporteIndividual.folio}`}
+              srcDoc={reporteIndividual.html}
+              className="w-full h-full bg-white rounded-xl border border-slate-300 shadow-sm"
+            />
+          </div>
+        </div>
+      )}
+
+      {generandoReporteIndividual && (
+        <div className="fixed inset-0 z-[95] bg-black/40 flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-xl px-5 py-4 shadow-xl text-sm font-semibold text-slate-700">
+            Generando reporte...
+          </div>
+        </div>
       )}
 
       {/* MODAL EDITAR ACTIVIDAD - SOLO ADMIN */}
